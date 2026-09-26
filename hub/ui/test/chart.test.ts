@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {cellLabel, edgeRows, fitting, liftOf, shortName, slideOf} from '../components/Chart';
+import {cellLabel, edgeRows, fitting, graphemes, liftOf, shortName, slideOf} from '../components/Chart';
 import {setLocale} from '../i18n';
 import {preferring} from './browser';
 
@@ -55,17 +55,23 @@ test('a label at the chart\'s edge keeps as much of a name as fits, an emoji who
   assert.equal(fitting(widths, 100, 6, 130), 5, 'fits whole');
   assert.equal(fitting(widths, 100, 6, 129), 3, 'three and an ellipsis');
   assert.equal(fitting([20, 20, 20], 100, 6, 150), 2, 'wide characters, as many as fit');
+  assert.equal(fitting(widths, 100, 6, 124), 3, 'three and an ellipsis to the pixel');
   assert.equal(fitting(widths, 100, 6, 105), 0, 'no room for any of it');
   assert.equal(shortName('Claude', 6), 'Claude');
   assert.equal(shortName('Ahead of the plan', 6), 'Ahead…', 'no space before the ellipsis');
-  assert.equal(shortName('Team 🚀🚀🚀🚀', 6), 'Team 🚀…', 'an emoji is one character, never cut in half');
+  assert.equal(shortName('Antigravity 2 · Gemini', 15), 'Antigravity 2…', 'nor a separator');
   assert.equal(shortName('Claude', 0), '…');
+  // A flag, an emoji with a skin tone or joined of several, a letter with its accent: each one character, never cut apart.
+  assert.deepEqual(graphemes('Team 🇷🇺👍🏽👩‍💻é'), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '👍🏽', '👩‍💻', 'é']);
+  assert.equal(shortName('Team 🚀🚀🚀🚀', 6), 'Team 🚀…');
+  assert.equal(shortName('Team 🇷🇺🇷🇺🇷🇺', 7), 'Team 🇷🇺🇷🇺…');
+  assert.equal(shortName('Team 👩‍💻👩‍💻 ops', 6), 'Team 👩‍💻…');
 });
 
 test('with labels past the right edge, an announcement inside the chart takes a row of the stack first', () => {
   const up = edgeRows(['announced'], ['forecast-a', 'forecast-b'], 264, false);
   assert.deepEqual([...up], [['announced', 264], ['forecast-a', 242], ['forecast-b', 220]]);
   assert.equal(new Set(up.values()).size, up.size, 'no two labels share a row');
-  assert.deepEqual([...edgeRows([], ['announced'], 30, true)], [['announced', 30]], 'an announcement past the edge, down from the top');
+  assert.deepEqual([...edgeRows(['announced'], ['forecast-a', 'forecast-b'], 30, true)], [['announced', 30], ['forecast-a', 52], ['forecast-b', 74]], 'down from the top');
   assert.equal(edgeRows(['announced'], [], 264, false).size, 0, 'no stack without labels past the edge: the announcement stands where it would alone');
 });

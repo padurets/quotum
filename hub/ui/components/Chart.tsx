@@ -25,10 +25,15 @@ const LABEL_BAND = 15;
 /** How far apart labels stacked at the right edge stand. */
 const LABEL_STEP = 22;
 
-/** A name shortened to its first `keep` characters, counted as a reader does (an emoji is one), and an ellipsis. */
+const graphemeSegmenter = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+
+/** The characters of a text as a reader counts them: a flag, an emoji with its skin tone or a letter with its accent is one. */
+export const graphemes = (text: string) => Array.from(graphemeSegmenter.segment(text), part => part.segment);
+
+/** A name shortened to its first `keep` characters and an ellipsis, with no space or separator hanging before it. */
 export function shortName(name: string, keep: number) {
-  const letters = Array.from(name);
-  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').trimEnd()}…`;
+  const letters = graphemes(name);
+  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(/[\s·,:;–—-]+$/u, '')}…`;
 }
 
 /**
@@ -68,6 +73,7 @@ function MarkerLabel({
   color,
   children,
   shorten,
+  fonts,
   onTip,
 }: {
   x: number;
@@ -77,37 +83,42 @@ function MarkerLabel({
   children: string;
   /** Wider than `room`, the text is said again with `name` in it shortened to what fits. */
   shorten?: {name: string; say: (name: string) => string; room: number};
+  /** Counts the web fonts loaded: what was measured before one came is measured again. */
+  fonts: number;
   onTip?: (shown: boolean, tapped: boolean) => void;
 }) {
   const text = useRef<SVGTextElement>(null);
+  const whole = useRef<SVGTextElement>(null);
   const [box, setBox] = useState<{x: number; width: number} | null>(null);
-  // How many characters of the name it keeps; all until the whole text is measured too wide.
-  const [keep, setKeep] = useState<number | null>(null);
+  // How many characters of the name it keeps, for the text, room and fonts it was measured
+  // with (`input`): a fit found for anything else is not used, and the text shows whole.
+  const input = shorten ? `${children}|${shorten.room}|${fonts}` : '';
+  const [fit, setFit] = useState<{input: string; keep: number | null} | null>(null);
+  const keep = fit?.input === input ? fit.keep : null;
   const shown = shorten && keep !== null ? shorten.say(shortName(shorten.name, keep)) : children;
-  useLayoutEffect(() => setKeep(null), [children, shorten?.room]);
+  // Measured once for each input, on a hidden copy of the whole text with an ellipsis after
+  // it: its width, each character of the name as drawn in it, and the ellipsis.
   useLayoutEffect(() => {
-    const element = text.current;
-    if (!element || !shorten) return;
-    const length = element.getComputedTextLength();
-    if (length <= shorten.room) return;
-    // Cut once more if the ellipsis took more room than it was given.
-    if (keep !== null) return setKeep(Math.max(0, keep - 1));
-    // Each character of the name as drawn in the whole text, the rest of it, and an
-    // ellipsis about as wide as its average character.
-    const start = shown.indexOf(shorten.name);
-    let at = start;
-    const widths = Array.from(shorten.name, letter => {
-      const width = element.getSubStringLength(at, letter.length);
-      at += letter.length;
-      return width;
-    });
-    const name = widths.reduce((sum, width) => sum + width, 0);
-    setKeep(fitting(widths, length - name, length / shown.length, shorten.room));
-  }, [shown, shorten?.room]);
+    const element = whole.current;
+    if (!shorten || !element) return;
+    const length = element.getSubStringLength(0, children.length);
+    let found: number | null = null;
+    if (length > shorten.room) {
+      let at = children.indexOf(shorten.name);
+      const widths = graphemes(shorten.name).map(letter => {
+        const width = element.getSubStringLength(at, letter.length);
+        at += letter.length;
+        return width;
+      });
+      const name = widths.reduce((sum, width) => sum + width, 0);
+      found = fitting(widths, length - name, element.getSubStringLength(children.length, 1), shorten.room);
+    }
+    setFit(fit => (fit?.input === input && fit.keep === found ? fit : {input, keep: found}));
+  }, [input]);
   useLayoutEffect(() => {
     const measured = text.current?.getBBox();
     if (measured) setBox({x: measured.x, width: measured.width});
-  }, [x, y, end, shown]);
+  }, [x, y, end, shown, fonts]);
   return (
     <g
       className={`marker-label ${onTip ? 'is-pointed' : ''} ${color ? 'is-forecast' : ''}`}
@@ -120,6 +131,11 @@ function MarkerLabel({
       <text ref={text} x={x} y={y} textAnchor={end ? 'end' : 'start'}>
         {shown}
       </text>
+      {shorten && (
+        <text ref={whole} x={x} y={y} textAnchor={end ? 'end' : 'start'} visibility="hidden" aria-hidden="true">
+          {`${children}…`}
+        </text>
+      )}
     </g>
   );
 }
@@ -300,6 +316,13 @@ export function Chart({
   // Past the right edge: an announcement, then where windows run out, each said there,
   // how soon by the page's clock as the table says it, a series' name shortened to the plot.
   const pageNow = useNow(MINUTE);
+  // Labels are measured: a web font that arrives later makes them as wide as they are drawn.
+  const [fonts, setFonts] = useState(0);
+  useEffect(() => {
+    const loaded = () => setFonts(count => count + 1);
+    document.fonts?.addEventListener('loadingdone', loaded);
+    return () => document.fonts?.removeEventListener('loadingdone', loaded);
+  }, []);
   const beyond = [
     ...markers
       .filter(m => m.strong && !m.past && m.at > to)
@@ -600,7 +623,7 @@ export function Chart({
               const nearRight = mx > width - right - 150;
               const lx = nearRight ? mx - 6 : mx + 6;
               return (
-                <MarkerLabel key={marker.key} x={lx} y={stackRows.get(marker.key) ?? labelY(lx, nearRight)} end={nearRight}>
+                <MarkerLabel key={marker.key} x={lx} y={stackRows.get(marker.key) ?? labelY(lx, nearRight)} end={nearRight} fonts={fonts}>
                   {marker.label}
                 </MarkerLabel>
               );
@@ -613,8 +636,9 @@ export function Chart({
                 y={stackRows.get(label.key)!}
                 end
                 color={label.color}
-                // Its backing stays within the plot, 6 past the text on either side.
-                shorten={label.say && {name: label.label, say: label.say, room: width - left - right - 12}}
+                fonts={fonts}
+                // It ends at the plot's right edge, and its backing, 6 wider than the text, starts within the plot.
+                shorten={label.say && {name: label.label, say: label.say, room: width - left - right - 6}}
                 onTip={(shown, tapped) => setEdge(shown ? {key: label.key, tapped} : null)}
               >
                 {label.text}
