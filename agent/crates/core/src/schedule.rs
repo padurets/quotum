@@ -1,8 +1,14 @@
 //! When to measure what. Clients run strictly one at a time; each provider has its
 //! own interval (at least a minute), and providers are spread evenly across it so
-//! their starts never pile up. Pure logic: the caller supplies time and randomness.
+//! their starts never pile up. While the hub sets the pace of a provider's
+//! subscription, the provider is measured when the hub says so and the hub is asked
+//! often, about all such providers at once. Pure logic: the caller supplies time and
+//! randomness.
+
+use std::collections::VecDeque;
 
 use crate::model::{ErrorKind, Millis, Outcome, STALE_LIMIT_MS};
+use crate::sink::Directive;
 
 /// Claude Code caches its answer for a minute; nothing changes faster than that.
 pub const MIN_INTERVAL_MS: u64 = 60_000;
@@ -13,6 +19,14 @@ pub const ECO_CAP_MS: u64 = 15 * 60_000;
 const RESET_GRACE_MS: u64 = 30_000;
 /// Share of an interval used for random jitter, so machines do not synchronize.
 const JITTER: f64 = 0.1;
+/// Never asks the hub again sooner than this, whatever it says.
+const ASK_FLOOR_MS: Millis = 10_000;
+/// A hub that does not answer is asked again this often, while its silence is borne.
+const ASK_AGAIN_MS: Millis = 15_000;
+/// How long a silent hub is borne before a paced provider is measured without it.
+const SILENCE_MS: Millis = 4 * 60_000;
+/// Providers due this close together are asked about in one check-in.
+const ASK_TOGETHER_MS: Millis = 5_000;
 
 #[derive(Clone, Debug)]
 struct Slot {
@@ -25,6 +39,10 @@ struct Slot {
     phase: f64,
     phased: bool,
     last: Option<Vec<(String, i64)>>,
+    /// The hub sets the pace: `due` is when to ask it next, not when to measure.
+    paced: bool,
+    /// Until when a silent hub is borne before measuring without it.
+    fallback_at: Option<Millis>,
 }
 
 impl Slot {
@@ -38,6 +56,8 @@ impl Slot {
 pub struct Schedule {
     slots: Vec<Slot>,
     eco: bool,
+    /// Slots the last check-in cleared to measure, in order, each with the hub's `nextInMs` when paced.
+    cleared: VecDeque<(usize, Option<u64>)>,
 }
 
 impl Schedule {
@@ -57,9 +77,11 @@ impl Schedule {
                 phase: i as f64 / count,
                 phased: false,
                 last: None,
+                paced: false,
+                fallback_at: None,
             })
             .collect();
-        Schedule { slots, eco }
+        Schedule { slots, eco, cleared: VecDeque::new() }
     }
 
     /// The slot to run next and when; ties go to the earlier-listed provider.
@@ -117,19 +139,122 @@ impl Schedule {
         slot.due
     }
 
-    /// Another device measures this provider's subscription: ask again at `until`
-    /// (kept between 30 s and the eco cap from now), without measuring.
-    pub fn postpone(&mut self, index: usize, now: Millis, until: Millis) -> Millis {
+    /// Which slots to ask the hub about now, if it is time to ask: every paced slot once
+    /// any of them is due (they share one timer), and the others due within a few
+    /// seconds. None while slots cleared by the last answer wait to be measured.
+    pub fn asks(&self, now: Millis) -> Vec<usize> {
+        if !self.cleared.is_empty() || !self.slots.iter().any(|s| s.due <= now) {
+            return Vec::new();
+        }
+        let paced = self.slots.iter().any(|s| s.paced && s.due <= now + ASK_TOGETHER_MS);
+        (0..self.slots.len())
+            .filter(|&i| if self.slots[i].paced { paced } else { self.slots[i].due <= now + ASK_TOGETHER_MS })
+            .collect()
+    }
+
+    /// A slot the check-in leaves out (its client is not here, its account not known):
+    /// it is measured now, on its own rhythm.
+    pub fn leave_out(&mut self, index: usize) {
+        self.unpace(index);
+        self.cleared.push_back((index, None));
+    }
+
+    /// The slot goes on its own rhythm, until the hub sets its pace again.
+    pub fn unpace(&mut self, index: usize) {
+        self.slots[index].paced = false;
+        self.slots[index].fallback_at = None;
+    }
+
+    /// Takes in what the hub answered about the slots asked about (`None` for a slot
+    /// that is due to measure at once without asking). The paced ones share the
+    /// soonest time the hub named to ask again. Returns the slots now waiting for
+    /// another device, to say so.
+    pub fn answer(&mut self, answers: &[(usize, Directive)], now: Millis) -> Vec<usize> {
+        let asked = |at: Millis| at.clamp(now + ASK_FLOOR_MS, now + ECO_CAP_MS as i64);
+        let shared = answers
+            .iter()
+            .filter_map(|(_, d)| match d {
+                Directive::Measure { paced: Some(p) } => Some(p.ask_at),
+                Directive::Wait { ask_at, on_duty: true } => Some(*ask_at),
+                _ => None,
+            })
+            .min()
+            .map(asked);
+        let mut waiting = Vec::new();
+        for &(index, directive) in answers {
+            let slot = &mut self.slots[index];
+            match directive {
+                Directive::Wait { ask_at, on_duty: false } => {
+                    slot.paced = false;
+                    slot.fallback_at = None;
+                    slot.phased = true;
+                    slot.due = asked(ask_at);
+                    waiting.push(index);
+                }
+                Directive::Wait { on_duty: true, .. } => {
+                    slot.paced = true;
+                    slot.due = shared.unwrap_or(now + ASK_AGAIN_MS);
+                    // Silence counts from when the hub said to ask again, however long that is.
+                    slot.fallback_at = Some(slot.fallback_at.unwrap_or(now).max(slot.due + SILENCE_MS));
+                }
+                Directive::Measure { paced: Some(p) } => {
+                    slot.paced = true;
+                    slot.due = shared.unwrap_or(now + ASK_AGAIN_MS);
+                    self.cleared.push_back((index, Some(p.next_in_ms)));
+                }
+                Directive::Measure { paced: None } => {
+                    slot.paced = false;
+                    slot.fallback_at = None;
+                    self.cleared.push_back((index, None));
+                }
+                Directive::Unanswered if slot.paced => {
+                    let fallback = *slot.fallback_at.get_or_insert(now + SILENCE_MS);
+                    if now >= fallback {
+                        // The hub stayed silent past what was promised: measure without it.
+                        slot.paced = false;
+                        slot.fallback_at = None;
+                        self.cleared.push_back((index, None));
+                    } else {
+                        slot.due = (now + ASK_AGAIN_MS).min(fallback).max(now + ASK_FLOOR_MS);
+                    }
+                }
+                Directive::Unanswered => self.cleared.push_back((index, None)),
+            }
+        }
+        waiting
+    }
+
+    /// The next slot cleared to measure now, with the hub's `nextInMs` when it sets the pace.
+    pub fn take_cleared(&mut self) -> Option<(usize, Option<u64>)> {
+        self.cleared.pop_front()
+    }
+
+    /// A paced slot was measured (or failed to be): the hub promised the next measurement
+    /// within `next_in_ms`, and waits out failures itself. Returns how long the
+    /// measurement stays representative. The slot asks again with the others.
+    pub fn measured_paced(&mut self, index: usize, now: Millis, next_in_ms: u64) -> u64 {
         let slot = &mut self.slots[index];
-        slot.phased = true;
-        slot.due = until.clamp(now + 30_000, now + ECO_CAP_MS as i64);
-        slot.due
+        slot.fallback_at = Some(now + (next_in_ms as i64).max(SILENCE_MS));
+        (next_in_ms + next_in_ms / 5 + 60_000).min(STALE_LIMIT_MS)
+    }
+
+    /// Whether the hub sets the pace of this slot.
+    pub fn paced(&self, index: usize) -> bool {
+        self.slots[index].paced
+    }
+
+    /// When the slot is due: to measure, or to ask the hub.
+    pub fn due(&self, index: usize) -> Millis {
+        self.slots[index].due
     }
 
     /// Moves every due time by `ms`, after the wall clock jumped by as much.
     pub fn shift(&mut self, ms: i64) {
         for slot in &mut self.slots {
             slot.due += ms;
+            if let Some(at) = &mut slot.fallback_at {
+                *at += ms;
+            }
         }
     }
 
@@ -145,6 +270,7 @@ impl Schedule {
 mod tests {
     use super::*;
     use crate::model::{Failure, Provider, Snapshot, Window};
+    use crate::sink::Paced;
 
     const MIN: i64 = 60_000;
 
@@ -227,14 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_for_another_device_is_bounded() {
-        let mut s = Schedule::new(&all(), 0, true);
-        assert_eq!(s.postpone(0, 0, 5 * MIN), 5 * MIN);
-        assert_eq!(s.postpone(0, 0, 1_000), 30_000, "never a busy loop");
-        assert_eq!(s.postpone(0, 0, 60 * MIN), 15 * MIN, "never longer than the eco cap");
-    }
-
-    #[test]
     fn after_a_long_sleep_providers_spread_out_again() {
         let mut s = Schedule::new(&all(), 0, false);
         for _ in 0..3 {
@@ -254,6 +372,172 @@ mod tests {
         let mut s = Schedule::new(&[day as u64], 0, false);
         s.complete(0, 0, &measured(1.0, None), false, 1.0);
         assert_eq!(s.stale_after_ms(0, 0), STALE_LIMIT_MS);
+    }
+
+    const S: i64 = 1_000;
+
+    fn measure(ask_at: Millis, next_in_ms: u64) -> Directive {
+        Directive::Measure { paced: Some(Paced { ask_at, next_in_ms }) }
+    }
+
+    fn wait(ask_at: Millis) -> Directive {
+        Directive::Wait { ask_at, on_duty: true }
+    }
+
+    /// Everything the last answer cleared, in order.
+    fn cleared(s: &mut Schedule) -> Vec<(usize, Option<u64>)> {
+        std::iter::from_fn(|| s.take_cleared()).collect()
+    }
+
+    #[test]
+    fn paced_slots_ask_together_every_15_seconds_and_measure_when_told() {
+        let mut s = Schedule::new(&all(), 0, true);
+        assert_eq!(s.asks(0), [0, 1, 2], "all at once at the start");
+        s.answer(&[(0, measure(15 * S, 240_000)), (1, wait(15 * S)), (2, wait(12 * S))], 0);
+        assert_eq!(cleared(&mut s), [(0, Some(240_000))]);
+        assert_eq!(s.measured_paced(0, 20 * S, 240_000), 240_000 * 6 / 5 + 60_000);
+        // One shared time, the soonest the hub named, for all three.
+        assert_eq!((s.due(0), s.due(1), s.due(2)), (12 * S, 12 * S, 12 * S));
+        assert!(s.asks(11 * S).is_empty());
+        assert_eq!(s.asks(12 * S), [0, 1, 2]);
+        // Never sooner than 10 s, never later than 15 minutes.
+        s.answer(&[(0, wait(13 * S)), (1, wait(13 * S)), (2, wait(13 * S))], 12 * S);
+        assert_eq!(s.due(0), 22 * S);
+        s.answer(&[(0, wait(2 * 3_600_000)), (1, wait(2 * 3_600_000)), (2, wait(2 * 3_600_000))], 22 * S);
+        assert_eq!(s.due(0), 22 * S + 15 * MIN);
+        // A clock set back moves the times to ask and to bear silence with it.
+        let fallback = s.slots[0].fallback_at.unwrap();
+        s.shift(-60 * MIN);
+        assert_eq!((s.due(0), s.slots[0].fallback_at), (22 * S + 15 * MIN - 60 * MIN, Some(fallback - 60 * MIN)));
+    }
+
+    #[test]
+    fn paced_slots_measured_at_different_times_still_ask_together() {
+        let mut s = Schedule::new(&[120_000, 120_000, 3_600_000], 0, true);
+        s.answer(&[(0, measure(15 * S, 240_000)), (1, wait(15 * S)), (2, Directive::Measure { paced: None })], 0);
+        assert_eq!(cleared(&mut s), [(0, Some(240_000)), (2, None)]);
+        s.measured_paced(0, 5 * S, 240_000);
+        s.complete(2, 6 * S, &measured(1.0, None), false, 0.0);
+        // The one on its own rhythm waits an hour; the paced two are asked about together.
+        assert_eq!(s.asks(15 * S), [0, 1]);
+        s.answer(&[(0, wait(15 * S)), (1, measure(15 * S, 480_000))], 15 * S);
+        assert_eq!(cleared(&mut s), [(1, Some(480_000))]);
+        s.measured_paced(1, 40 * S, 480_000);
+        assert_eq!(s.asks(30 * S), [0, 1], "one set, however far apart they were measured");
+
+        // A slot the check-in leaves out goes on its own rhythm, measured at once.
+        s.leave_out(1);
+        assert!(!s.paced(1));
+        assert_eq!(cleared(&mut s), [(1, None)]);
+
+        // Two slots cleared by one answer are both measured before the next question.
+        let mut s = Schedule::new(&[120_000, 120_000], 0, true);
+        s.answer(&[(0, measure(15 * S, 240_000)), (1, measure(15 * S, 240_000))], 0);
+        assert_eq!(s.take_cleared(), Some((0, Some(240_000))));
+        s.measured_paced(0, 70 * S, 240_000);
+        assert!(s.asks(70 * S).is_empty(), "the second is still cleared: no new question to overwrite it");
+        assert_eq!(s.take_cleared(), Some((1, Some(240_000))));
+        assert_eq!(s.asks(70 * S), [0, 1]);
+    }
+
+    #[test]
+    fn a_silent_hub_is_asked_again_every_15_seconds_and_borne_for_4_minutes() {
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, measure(15 * S, 240_000))], 0);
+        cleared(&mut s);
+        s.measured_paced(0, 5 * S, 240_000);
+        // Silent from then on: asked every 15 s until the promised measurement is due.
+        let mut now = 15 * S;
+        let mut asked = 0;
+        while s.paced(0) {
+            assert!(asked < 100, "still borne at {now}");
+            assert_eq!(s.asks(now), [0]);
+            s.answer(&[(0, Directive::Unanswered)], now);
+            if s.paced(0) {
+                assert_eq!(s.due(0) - now, (15 * S).min(s.slots[0].fallback_at.unwrap() - now).max(10 * S));
+                now = s.due(0);
+                asked += 1;
+            }
+        }
+        // Silence is borne until 4:05; the last question came at 4:00, and none comes sooner than 10 s after it.
+        assert_eq!(now, 10 * S + 4 * MIN, "measured without the hub once the promise is due");
+        assert!(asked >= 15);
+        assert_eq!(cleared(&mut s), [(0, None)]);
+
+        // It answers on a question again: the slot goes on at its pace.
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, wait(15 * S))], 0);
+        assert_eq!(s.slots[0].fallback_at, Some(15 * S + 4 * MIN), "from when it is to ask again");
+        s.answer(&[(0, Directive::Unanswered)], 15 * S);
+        s.answer(&[(0, wait(15 * S))], 30 * S);
+        assert!(s.paced(0));
+        assert_eq!(s.slots[0].fallback_at, Some(40 * S + 4 * MIN), "borne anew from the answer's time to ask");
+        // A slot not yet measured in this run bears 4 minutes of silence too.
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, wait(15 * S))], 0);
+        s.slots[0].fallback_at = None;
+        s.answer(&[(0, Directive::Unanswered)], 15 * S);
+        assert_eq!(s.slots[0].fallback_at, Some(15 * S + 4 * MIN));
+        // One that does not follow the pace is measured at once, as without a hub.
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, Directive::Unanswered)], 0);
+        assert_eq!(cleared(&mut s), [(0, None)]);
+    }
+
+    #[test]
+    fn a_failed_paced_measurement_is_the_hub_s_to_wait_out() {
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, measure(15 * S, 240_000))], 0);
+        cleared(&mut s);
+        s.measured_paced(0, 5 * S, 240_000);
+        assert!(s.paced(0));
+        assert_eq!((s.slots[0].failures, s.slots[0].stretch), (0, 1), "no local back-off");
+        assert_eq!(s.due(0), 15 * S, "asks again with the others");
+        assert_eq!(s.slots[0].fallback_at, Some(5 * S + 4 * MIN));
+        s.measured_paced(0, 5 * S, 15 * MIN as u64);
+        assert_eq!(s.slots[0].fallback_at, Some(5 * S + 15 * MIN), "no sooner than the promise");
+    }
+
+    #[test]
+    fn another_device_on_duty_takes_the_slot_off_the_pace() {
+        let mut s = Schedule::new(&[120_000, 120_000], 0, true);
+        s.answer(&[(0, measure(15 * S, 240_000)), (1, measure(15 * S, 240_000))], 0);
+        cleared(&mut s);
+        let waiting = s.answer(&[(0, wait(15 * S)), (1, Directive::Wait { ask_at: 10 * MIN, on_duty: false })], 15 * S);
+        assert_eq!(waiting, [1]);
+        assert!(s.paced(0) && !s.paced(1));
+        assert_eq!(s.due(1), 10 * MIN);
+        assert_eq!(s.asks(30 * S), [0], "asked about on its own");
+        // Waiting for another device is bounded: never a busy loop, never longer than the eco cap.
+        let other = |ask_at| Directive::Wait { ask_at, on_duty: false };
+        s.answer(&[(1, other(0))], MIN);
+        assert_eq!(s.due(1), MIN + 10 * S);
+        s.answer(&[(1, other(5 * 3_600_000))], MIN);
+        assert_eq!(s.due(1), MIN + 15 * MIN);
+    }
+
+    #[test]
+    fn a_hub_silent_right_after_a_long_wait_it_asked_for_is_borne_as_any_silence() {
+        // On duty, told to ask again in ten minutes (a pause after failures): one lost
+        // answer then is asked again, not taken for four minutes of silence.
+        let mut s = Schedule::new(&[120_000], 0, true);
+        s.answer(&[(0, wait(10 * MIN))], 0);
+        s.answer(&[(0, Directive::Unanswered)], 10 * MIN);
+        assert!(s.paced(0));
+        assert_eq!(s.due(0), 10 * MIN + 15 * S);
+        assert_eq!(cleared(&mut s), []);
+    }
+
+    #[test]
+    fn paced_slots_asked_about_apart_are_asked_about_together_from_then_on() {
+        // One became paced at one answer, the other at another: their times to ask differ.
+        let mut s = Schedule::new(&[120_000, 120_000], 0, true);
+        s.answer(&[(0, wait(25 * S))], 0);
+        s.answer(&[(1, wait(40 * S))], 0);
+        assert_eq!((s.due(0), s.due(1)), (25 * S, 40 * S));
+        assert_eq!(s.asks(25 * S), [0, 1], "one check-in for both");
+        s.answer(&[(0, wait(40 * S)), (1, wait(40 * S))], 25 * S);
+        assert_eq!(s.due(0), s.due(1));
     }
 
     #[test]

@@ -36,9 +36,14 @@ export type SourceState = {
   mine: boolean;
   /** The coding agents running on it right now, on any machine. */
   sessions: LiveSession[];
+  /** When it is measured next and why, while the hub sets the pace of the device measuring it; `next` may have passed. */
+  cadence: {next: number; why: CadenceWhy} | null;
   /** How the dashboard names the source (set by the client from the whole board). */
   title?: string;
 };
+
+/** Why the next measurement comes when it does: little left, in use, numbers that just changed or stay the same, a reset. */
+export type CadenceWhy = 'low' | 'inUse' | 'changed' | 'idle' | 'reset';
 
 /** A coding agent running on a machine, spending the subscription of its card. */
 export type LiveSession = {

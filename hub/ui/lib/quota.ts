@@ -1,4 +1,4 @@
-import type {Kind, SourceState} from './types';
+import type {CadenceWhy, Kind, SourceState} from './types';
 import {known, t} from '../i18n';
 import {PROVIDERS} from './providers';
 import {duration} from './format';
@@ -82,9 +82,24 @@ export function dotOf(source: Pick<SourceState, 'stale' | 'error' | 'successAt'>
   return {warn: false, pulsing: age < PULSE_FOR, fresh: freshness(age)};
 }
 
+/** Within this of the next measurement, or past it, the card says it comes any moment. */
+export const SOON = 15_000;
+
+export type Cadence = {when: 'nextIn' | 'nextSoon'; next: number; why: CadenceWhy};
+
+/**
+ * When the next measurement comes and why, for the dot's tooltip: while the hub sets the
+ * pace, and the dot is not telling of trouble.
+ */
+export function cadenceOf(source: Pick<SourceState, 'stale' | 'error' | 'successAt' | 'cadence'>, now: number): Cadence | null {
+  if (!source.cadence || dotOf(source, now).warn) return null;
+  const {next, why} = source.cadence;
+  return {when: next - now <= SOON ? 'nextSoon' : 'nextIn', next, why};
+}
+
 /**
  * How fresh a source's numbers are, from 1 (just measured) to 0 (a while ago). It only
- * says how old they are, not that anything is wrong: in eco mode a quiet subscription
+ * says how old they are, not that anything is wrong: a quiet subscription
  * is measured every quarter of an hour, and that is fine. Trouble has its own colour.
  */
 export function freshness(age: number): number {

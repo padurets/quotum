@@ -201,23 +201,33 @@ export function parseBatch(body: unknown): AgentBatch {
   };
 }
 
-/** A check-in: which subscriptions a device could measure now, and whether it is in use. */
+/**
+ * A check-in: which subscriptions a device could measure now, and whether it is in use.
+ * `paced`: the device follows the hub's pace; `minIntervalMs`: the most often it agrees
+ * to measure a subscription.
+ */
 export type Checkin = AgentSender & {
-  subscriptions: {provider: Provider; account: string | null; accountName: string | null; active: boolean}[];
+  paced: boolean;
+  subscriptions: {provider: Provider; account: string | null; accountName: string | null; active: boolean; minIntervalMs: number | null}[];
 };
 
 export function parseCheckin(body: unknown): Checkin {
   const sender = parseSender(body);
+  const paced = (body as Obj).paced ?? false;
+  if (typeof paced !== 'boolean') throw new Invalid('paced');
   const subscriptions = list((body as Obj).subscriptions, 'subscriptions', 16).map(value => {
     if (!isObject(value) || typeof (value.active ?? false) !== 'boolean') throw new Invalid('subscription');
+    const least = value.minIntervalMs ?? null;
+    if (least !== null && (!Number.isInteger(least) || (least as number) < 60_000 || (least as number) > 86_400_000)) throw new Invalid('minIntervalMs');
     return {
       provider: provider(value.provider),
       account: account(value.account),
       accountName: text(value.accountName, 'accountName', true),
       active: value.active === true,
+      minIntervalMs: least as number | null,
     };
   });
-  return {...sender, subscriptions};
+  return {...sender, paced, subscriptions};
 }
 
 /**

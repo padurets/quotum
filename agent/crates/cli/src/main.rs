@@ -586,7 +586,14 @@ fn show_config(config: &Config, paths: &Paths) -> ExitCode {
         None if connected.is_some() => {}
         None => println!("hub           none: `quotum run` only logs; `quotum connect <url>` to connect"),
     }
-    println!("eco mode      {}", if config.eco() { "on" } else { "off" });
+    // With a hub, it sets the pace; the settings here are what holds while it does not answer.
+    let paced = config.hub.is_some() || connected.is_some();
+    let eco = match (config.eco(), paced) {
+        (false, _) => "off",
+        (true, true) => "only while the hub does not answer",
+        (true, false) => "on",
+    };
+    println!("eco mode      {eco}");
     let sessions = match (config.sessions(), config.projects()) {
         (false, _) => "not told to the hub",
         (true, true) => "told to the hub, with project and folder names",
@@ -597,11 +604,15 @@ fn show_config(config: &Config, paths: &Paths) -> ExitCode {
     for provider in Provider::ALL {
         let client =
             config.program(provider).map(|p| p.to_path_buf()).or_else(|| find_client(&*adapter(provider), &home));
+        let pace = match (paced, config.min_interval_ms(provider)) {
+            (true, Some(ms)) => format!("as the hub paces it, at most every {}s", ms / 1000),
+            (true, None) => "as the hub paces it".into(),
+            (false, _) => format!("every {}s", config.interval_ms(provider) / 1000),
+        };
         println!(
-            "{:<13} {}, every {}s, client {}",
+            "{:<13} {}, {pace}, client {}",
             provider.id(),
             if config.enabled(provider) { "on" } else { "off" },
-            config.interval_ms(provider) / 1000,
             client.map(|p| p.display().to_string()).unwrap_or_else(|| "not found".into())
         );
     }

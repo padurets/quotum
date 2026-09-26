@@ -4,7 +4,7 @@ import {agentRows, DRAWN, drawn, folderOf} from '../lib/agents';
 import {chartEvents, chartResets, type Line} from '../lib/lines';
 import {planCell} from '../lib/forecast';
 import {DEFAULT_PLAN, planNote} from '../lib/plan';
-import {dotOf, PULSE_FOR, resetLine} from '../lib/quota';
+import {cadenceOf, dotOf, PULSE_FOR, resetLine} from '../lib/quota';
 import {resetLabel, type ResetStatus} from '../lib/resets';
 import type {LiveSession, SourceState, View, Win} from '../lib/types';
 import {boardState, cardId, isWindowHidden} from '../lib/view';
@@ -88,6 +88,22 @@ test('a board without subscriptions invites to connect one; with every widget hi
   assert.deepEqual(dotOf(measured(0, {stale: true}), now), {warn: true}, 'numbers gone stale outweigh their age');
   assert.deepEqual(dotOf(measured(0, {error: 'signed_out'}), now), {warn: true});
   assert.equal(dotOf(measured(0, {error: 'waiting'}), now).warn, false, 'waiting for a first measurement is no trouble');
+});
+
+test('the dot tells when the next measurement comes and why, while the hub sets the pace and nothing is wrong', () => {
+  const MIN = 60_000;
+  const source = (next: number, change: Partial<SourceState> = {}) =>
+    ({stale: false, error: null, successAt: now - MIN, cadence: {next, why: 'idle' as const}, ...change}) as Pick<SourceState, 'stale' | 'error' | 'successAt' | 'cadence'>;
+  assert.deepEqual(cadenceOf(source(now + 3 * MIN), now), {when: 'nextIn', next: now + 3 * MIN, why: 'idle'});
+  assert.equal(cadenceOf(source(now + 15_001), now)?.when, 'nextIn');
+  assert.equal(cadenceOf(source(now + 15_000), now)?.when, 'nextSoon');
+  assert.equal(cadenceOf(source(now - MIN), now)?.when, 'nextSoon', 'a time passed: any moment');
+  assert.equal(cadenceOf(source(now, {cadence: null}), now), null, 'the hub does not set the pace');
+  assert.equal(cadenceOf(source(now, {stale: true}), now), null);
+  assert.equal(cadenceOf(source(now, {error: 'timeout'}), now), null);
+  for (const why of ['low', 'inUse', 'changed', 'idle', 'reset'] as const) {
+    assert.equal(cadenceOf(source(now + MIN, {cadence: {next: now + MIN, why}}), now)?.why, why);
+  }
 });
 
 test('the chart marks what happened after it begins, on a line it draws', () => {

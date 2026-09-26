@@ -7,7 +7,7 @@ import {
   asksToTakeOver,
   failedTitle,
   inApp,
-  intervalChoices,
+  intervalMenu,
   onboardingText,
   takeOverText,
   takeOverTitle,
@@ -232,8 +232,12 @@ export function Measuring({state, onState}: {state: AppState; onState: (state: A
     <section className="drawer-section">
       <h3>{t('measure.title')}</h3>
       <p className="drawer-note is-first">{rich('measure.shared', {quotum})}</p>
+      {state.providers.some(p => intervalMenu(p).hint?.key === 'measure.autoHint') && <p className="drawer-note">{t('measure.autoHint')}</p>}
       {state.providers.map(provider => {
         const name = PROVIDERS[provider.id]?.name ?? provider.id;
+        const menu = intervalMenu(provider);
+        // Said once for the section; where the interval is set is said by the provider it holds for.
+        const where = menu.hint && menu.hint.key !== 'measure.autoHint' ? menu.hint : null;
         return (
           <div key={provider.id} className="measure-provider">
             <div className="measure-head">
@@ -243,18 +247,25 @@ export function Measuring({state, onState}: {state: AppState; onState: (state: A
               <label className="measure-interval">
                 <span className="sr-only">{t('measure.interval')}</span>
                 <select
-                  value={provider.intervalS / 60}
+                  value={String(menu.selected)}
                   disabled={!provider.enabled}
-                  onChange={event => void save({providers: {[provider.id]: {intervalS: Number(event.target.value) * 60}}}, provider.id)}
+                  onChange={event => {
+                    const choice = event.target.value;
+                    void save({providers: {[provider.id]: {intervalS: choice === 'first' ? null : Number(choice) * 60}}}, provider.id);
+                  }}
                 >
-                  {intervalChoices(provider.intervalS).map(minutes => (
+                  <option value="first" disabled={!menu.firstAvailable}>
+                    {menu.first === 'auto' ? t('measure.auto') : t('measure.inherited', {count: (provider.inheritedS ?? 0) / 60})}
+                  </option>
+                  {menu.choices.map(minutes => (
                     <option key={minutes} value={minutes}>
-                      {t('measure.minutes', {count: minutes})}
+                      {t('measure.atMost', {count: minutes})}
                     </option>
                   ))}
                 </select>
               </label>
             </div>
+            {where && <p className="drawer-note">{t(where.key, where.vars)}</p>}
             <Status provider={provider} configPath={state.configPath} />
             {provider.id === 'antigravity' && provider.enabled && (
               <AccountName provider={provider} onSave={account => save({providers: {antigravity: {account}}}, `${provider.id}.account`)} />

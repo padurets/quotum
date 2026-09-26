@@ -54,7 +54,11 @@ import {
  * minutes of a run, or by starting it again: the sleeping machine, agents that come and
  * go, a five-hour window ahead of its pace or foreseen between two of its resets, a week
  * begun too recently to be foreseen (8.4 hours). A code about a change of agents begins
- * 15 seconds after it at the earliest, when a list that shows it has gone out.
+ * 15 seconds after it at the earliest, when a list that shows it has gone out. The cards
+ * measured at the hub's pace (`paced`) say what their dot tells of the next measurement
+ * for minutes from `start`, one resetting ten minutes in: a test of their own asks every
+ * 15 seconds as their machine does, while the long one measures them on its rhythm and
+ * leaves those codes out.
  *
  * A new state gets an entry here with at least one code; the test picks it up.
  */
@@ -849,6 +853,80 @@ const all: DemoSet = {
       windows: [fiveHours(3 * HOUR, 5), weekly({since: -DAY, use: steady(0, 15)})],
       expect: [{title: 'Claude 2'}],
       look: ['Ben keeps this one off Team'],
+    },
+
+    // Measured at the hub's pace, one reason each, all by one machine asking every 15 seconds.
+    {
+      kind: 'card',
+      id: 'paced-low',
+      provider: 'codex',
+      plan: 'pro',
+      machines: ['pacer'],
+      history: DAY,
+      paced: true,
+      windows: [weekly({since: -5 * DAY, use: steady(84, 2)})],
+      expect: [
+        {window: 'weekly', level: 'crit'},
+        {from: 15 * SECOND, to: 15 * SECOND, cadence: 'nextIn', why: 'low'},
+        {from: 45 * SECOND, to: 45 * SECOND, cadence: 'nextSoon', why: 'low'},
+      ],
+      look: [
+        'The tooltip of the dot says when it was measured, when the next measurement comes (in so long, then the time) and why, a line each, in both languages',
+        'It opens below the logo, whole on a card in the top row and on a narrow screen',
+      ],
+    },
+    {
+      kind: 'card',
+      id: 'paced-in-use',
+      provider: 'codex',
+      plan: 'pro',
+      machines: ['pacer'],
+      history: DAY,
+      paced: true,
+      windows: [weekly({since: -3 * DAY, use: () => 60})],
+      agents: [{machine: 'pacer', origin: 'terminal', project: 'paced', since: -HOUR, works: ALWAYS}],
+      expect: [{error: null}, {from: 15 * SECOND, to: 75 * SECOND, cadence: 'nextIn', why: 'inUse'}],
+    },
+    {
+      kind: 'card',
+      id: 'paced-changed',
+      provider: 'codex',
+      plan: 'pro',
+      machines: ['pacer'],
+      history: DAY,
+      paced: true,
+      windows: [weekly({since: -2 * HOUR, use: steady(5, 150)})],
+      expect: [{error: null}, {from: 15 * SECOND, to: 75 * SECOND, cadence: 'nextIn', why: 'changed'}],
+    },
+    {
+      kind: 'card',
+      id: 'paced-idle',
+      provider: 'claude',
+      plan: 'Claude Pro',
+      machines: ['pacer'],
+      history: DAY,
+      paced: true,
+      windows: [weekly({since: -3 * DAY, use: () => 35})],
+      expect: [
+        {error: null},
+        {from: 15 * SECOND, to: 14 * MIN + 15 * SECOND, cadence: 'nextIn', why: 'idle'},
+        {from: 14 * MIN + 45 * SECOND, to: 14 * MIN + 45 * SECOND, cadence: 'nextSoon', why: 'idle'},
+      ],
+    },
+    {
+      kind: 'card',
+      id: 'paced-reset',
+      provider: 'claude',
+      plan: 'Claude Pro',
+      machines: ['pacer'],
+      history: DAY,
+      paced: true,
+      windows: [weekly({since: 10 * MIN - 7 * DAY, use: () => 50})],
+      expect: [
+        {error: null},
+        {from: 15 * SECOND, to: 9 * MIN + 45 * SECOND, cadence: 'nextIn', why: 'reset'},
+        {from: 10 * MIN + 15 * SECOND, to: 10 * MIN + 15 * SECOND, cadence: 'nextSoon', why: 'reset'},
+      ],
     },
   ],
 };

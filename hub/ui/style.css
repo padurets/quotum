@@ -180,13 +180,14 @@ body.is-resizing, body.is-resizing * { cursor: ew-resize !important; user-select
 @media (prefers-reduced-motion: reduce) { .dot-fresh.is-pulsing::after { animation: none; opacity: 0; } }
 .card-title { margin-right: auto; }
 /*
- * The dot's tooltip, one bubble everywhere, above the logo where the pointer covers none of
- * it: under the pointer after a moment on a desktop,
- * for a while after a tap on a touch screen (SourceCard). It passes under the sticky bars,
- * like the card it belongs to, rather than over the board's navigation.
+ * The dot's tooltip, one bubble everywhere, a line per block: under the pointer after a
+ * moment on a desktop, for a while after a tap on a touch screen (SourceCard). It opens
+ * below the logo, far enough for the pointer to cover none of its first line: above it,
+ * a card in the top row would lose its lines under the sticky bars, which it passes
+ * under like the card it belongs to, rather than over the board's navigation.
  */
 .dot-tip {
-  position: absolute; bottom: calc(100% + 8px); left: -6px; z-index: 4; width: max-content; max-width: min(260px, calc(100vw - 48px)); padding: 6px 10px;
+  position: absolute; top: calc(100% + 22px); left: -6px; z-index: 4; display: grid; width: max-content; max-width: min(260px, calc(100vw - 48px)); padding: 6px 10px;
   border-radius: 9px; font-size: 12.5px; line-height: 1.35; color: var(--text); pointer-events: none;
   opacity: 0; visibility: hidden; transition: opacity .12s, visibility .12s;
 }

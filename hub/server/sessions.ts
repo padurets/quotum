@@ -101,6 +101,14 @@ export class Sessions {
     return found.sort((a, b) => a.device.name.localeCompare(b.device.name) || a.device.id.localeCompare(b.device.id) || a.startedAt - b.startedAt);
   }
 
+  /** Whether an agent works on a subscription on any machine, by lists that still count as true. */
+  working(source: string, now: number): boolean {
+    for (const machine of this.machines.values()) {
+      if (now - machine.at <= CREDIT_MS && machine.sources.get(source)?.some(s => s.working)) return true;
+    }
+    return false;
+  }
+
   /**
    * Credits the working sessions of a machine's list with the time from its report to
    * `until`; the store leaves out what a clock set back would credit twice.

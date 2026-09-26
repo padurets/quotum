@@ -53,4 +53,14 @@ export class Duty {
   holder(subscription: string): string | null {
     return this.holders.get(subscription)?.device ?? null;
   }
+
+  /** When the holder's lease runs out. */
+  until(subscription: string): number | null {
+    return this.holders.get(subscription)?.until ?? null;
+  }
+
+  /** When the holder last said its client is in use. */
+  activeAt(subscription: string): number | null {
+    return this.holders.get(subscription)?.activeAt || null;
+  }
 }

@@ -2,8 +2,8 @@ import {memo, useEffect, useRef, useState, type CSSProperties} from 'react';
 import {useNow} from '../lib/api';
 import type {SourceState, Win} from '../lib/types';
 import {windowKey} from '../lib/types';
-import {duration, num, stamp} from '../lib/format';
-import {dotOf, errorText, level, problemOf, resetLine, sourceLabel, windowName} from '../lib/quota';
+import {countdown, duration, num, stamp} from '../lib/format';
+import {cadenceOf, dotOf, errorText, level, problemOf, resetLine, sourceLabel, windowName} from '../lib/quota';
 import {t, useLocale} from '../i18n';
 import {DEFAULT_PLAN, isValidPlan, planAt, planNote, planTotal, type WeeklyPlan} from '../lib/plan';
 import {LOGOS} from './logos';
@@ -314,6 +314,17 @@ export const SourceCard = memo(function SourceCard({
   // How the measurements go lives in the logo's dot alone: its colour (how fresh, or in
   // trouble) and its tooltip; a line of its own would only repeat it and make the card taller.
   const status = problem ?? (source.successAt ? t('source.measured', {at: stamp(source.successAt)}) : errorText('waiting'));
+  // Then when the next measurement comes (how soon, and the time) and why, each a line of its own.
+  const cadence = cadenceOf(source, now);
+  const lines = [
+    status,
+    ...(cadence
+      ? cadence.when === 'nextSoon'
+        ? [t('source.nextSoon')]
+        : [t('source.nextIn', {time: countdown(cadence.next - now)}), stamp(cadence.next)]
+      : []),
+    ...(cadence ? [t(`source.why.${cadence.why}`)] : []),
+  ];
   const news = resetLabel(resets, now);
   // The dot's tooltip is one bubble everywhere: under the pointer on a desktop (style.css),
   // and for a while after a tap on a touch screen, which has nothing to hover.
@@ -334,7 +345,7 @@ export const SourceCard = memo(function SourceCard({
       <div className="card-head">
         <span
           className={`provider-mark ${dot.warn ? 'is-warn' : ''} ${tip ? 'is-tipped' : ''}`}
-          aria-label={status}
+          aria-label={lines.join('\n')}
           role="img"
           onPointerUp={event => event.pointerType === 'touch' && setTip(true)}
         >
@@ -345,7 +356,9 @@ export const SourceCard = memo(function SourceCard({
             <i className={`dot dot-fresh ${dot.pulsing ? 'is-pulsing' : ''}`} style={{'--fresh': dot.fresh} as CSSProperties} />
           )}
           <span className="dot-tip glass" aria-hidden="true">
-            {status}
+            {lines.map(line => (
+              <span key={line}>{line}</span>
+            ))}
           </span>
         </span>
         <div className="card-title">

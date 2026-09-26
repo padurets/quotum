@@ -6,6 +6,7 @@ import path from 'node:path';
 import {Store} from '../store/store.js';
 import {Directory} from '../store/directory.js';
 import {Duty} from '../duty.js';
+import {Cadence} from '../cadence.js';
 import {Ingest, IngestError, type Credential} from '../ingest.js';
 import {Invalid, parseBatch, parseSessions} from '../domain/ingest.js';
 import {edge, onGrid, series, type Sample} from '../domain/quota.js';
@@ -50,7 +51,7 @@ const batch = (snapshots: unknown[], failures: unknown[] = [], machine = 'machin
 function setup() {
   const store = new Store(path.join(mkdtempSync(path.join(tmpdir(), 'quotum-ingest-')), 'db.sqlite'), start);
   const directory = new Directory(store.db);
-  const ingest = new Ingest(store, directory, new Duty());
+  const ingest = new Ingest(store, directory, new Duty(), new Cadence());
   const alice = directory.createUser('alice@example.com', 'Alice', 'x', start);
   const board = directory.boards(alice.id)[0].id;
   const secret = newSecret('qt_m');

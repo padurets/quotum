@@ -32,6 +32,17 @@ pub struct Config {
     /// whose token it uses; the key is still read so an older file keeps working.
     #[serde(skip_serializing)]
     pub owner: Option<String>,
+    /// Whether the global interval came from `QUOTUM_INTERVAL` rather than the file.
+    #[serde(skip)]
+    interval_from_env: bool,
+}
+
+/// Where the interval of a provider is set: for it alone, for all in the file, or by `QUOTUM_INTERVAL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntervalSource {
+    Provider,
+    File,
+    Env,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -106,6 +117,7 @@ impl Config {
                 value.trim().parse().map_err(|_| format!("QUOTUM_INTERVAL: \"{value}\" is not a number of seconds"))?;
             check_interval("QUOTUM_INTERVAL", Some(seconds))?;
             self.interval = Some(seconds);
+            self.interval_from_env = true;
         }
         match (var("QUOTUM_HUB_URL"), var("QUOTUM_HUB_TOKEN")) {
             (Some(url), Some(token)) => self.hub = Some(Hub { url, token }),
@@ -131,6 +143,27 @@ impl Config {
     pub fn interval_ms(&self, provider: Provider) -> u64 {
         let seconds = self.providers.get(&provider).and_then(|p| p.interval).or(self.interval);
         seconds.map(|s| s.saturating_mul(1000)).unwrap_or(DEFAULT_INTERVAL_MS).max(MIN_INTERVAL_MS)
+    }
+
+    /// The interval set for a provider, if any: with a hub, the most often it is measured.
+    pub fn min_interval_ms(&self, provider: Provider) -> Option<u64> {
+        self.interval_source(provider).map(|_| self.interval_ms(provider))
+    }
+
+    /// The interval set for all providers, if any, in ms, and where it is set.
+    pub fn global_interval(&self) -> Option<(u64, IntervalSource)> {
+        let source = if self.interval_from_env { IntervalSource::Env } else { IntervalSource::File };
+        self.interval.map(|s| (s.saturating_mul(1000).max(MIN_INTERVAL_MS), source))
+    }
+
+    pub fn interval_source(&self, provider: Provider) -> Option<IntervalSource> {
+        if self.providers.get(&provider).and_then(|p| p.interval).is_some() {
+            Some(IntervalSource::Provider)
+        } else if self.interval.is_some() {
+            Some(if self.interval_from_env { IntervalSource::Env } else { IntervalSource::File })
+        } else {
+            None
+        }
     }
 
     pub fn eco(&self) -> bool {
@@ -405,6 +438,23 @@ mod tests {
             .unwrap();
         assert_eq!(config.hub, Some(Hub { url: "https://hub.example".into(), token: "secret".into() }));
         assert_eq!(config.interval_ms(Provider::Claude), 90_000);
+    }
+
+    #[test]
+    fn an_interval_is_a_least_one_only_where_it_is_set() {
+        let mut config: Config = toml::from_str("[providers.claude]\ninterval = 300").unwrap();
+        assert_eq!((config.min_interval_ms(Provider::Codex), config.interval_source(Provider::Codex)), (None, None));
+        assert_eq!(config.min_interval_ms(Provider::Claude), Some(300_000));
+        assert_eq!(config.interval_source(Provider::Claude), Some(IntervalSource::Provider));
+        config.interval = Some(90);
+        assert_eq!(config.min_interval_ms(Provider::Codex), Some(90_000));
+        assert_eq!(config.interval_source(Provider::Codex), Some(IntervalSource::File));
+        assert_eq!(config.interval_source(Provider::Claude), Some(IntervalSource::Provider), "its own wins");
+        assert_eq!(config.global_interval(), Some((90_000, IntervalSource::File)));
+        config.apply_env(|key| (key == "QUOTUM_INTERVAL").then(|| "120".to_string())).unwrap();
+        assert_eq!(config.interval_source(Provider::Codex), Some(IntervalSource::Env));
+        assert_eq!(config.min_interval_ms(Provider::Codex), Some(120_000));
+        assert_eq!(config.global_interval(), Some((120_000, IntervalSource::Env)));
     }
 
     #[test]

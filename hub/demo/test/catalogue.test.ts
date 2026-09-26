@@ -6,6 +6,7 @@ import path from 'node:path';
 import type {AddressInfo} from 'node:net';
 import {buildApp} from '../../server/api.js';
 import {Duty} from '../../server/duty.js';
+import {Cadence} from '../../server/cadence.js';
 import {Ingest} from '../../server/ingest.js';
 import {Pairing} from '../../server/pairing.js';
 import {ResetFeed} from '../../server/resets.js';
@@ -20,7 +21,7 @@ import {chartEvents, chartResets, linesOf} from '../../ui/lib/lines.js';
 import {frameOf, step} from '../../ui/lib/periods.js';
 import {planNote, started} from '../../ui/lib/plan.js';
 import {shown as gathered, type Projects} from '../../ui/lib/projects.js';
-import {dotOf, level, resetLine, titled, windowName} from '../../ui/lib/quota.js';
+import {cadenceOf, dotOf, level, resetLine, titled, windowName} from '../../ui/lib/quota.js';
 import {resetLabel, type Resets, type TrackerHealth} from '../../ui/lib/resets.js';
 import {ANALYTICS_KINDS, type History, type Overview} from '../../ui/lib/types.js';
 import {AGENTS, boardState, cardId, FORECAST, HISTORY, isHidden, isWindowHidden, planOf} from '../../ui/lib/view.js';
@@ -68,7 +69,7 @@ async function hubFor(trackers: Trackers, scene: string, start: number) {
   const directory = new Directory(store.db);
   const urls = trackers.urls(scene);
   const resets = new ResetFeed((provider, reset) => store.announce(provider, reset), () => {}, {enabled: true, codexApi: urls.codex, claudeApi: urls.claude, timeoutMs: 300});
-  const app = await buildApp({store, directory, resets, ingest: new Ingest(store, directory, new Duty()), pairing: new Pairing(directory), setup: new Setup(true, SETUP), local: null});
+  const app = await buildApp({store, directory, resets, ingest: new Ingest(store, directory, new Duty(), new Cadence()), pairing: new Pairing(directory), setup: new Setup(true, SETUP), local: null});
   await app.listen({host: '127.0.0.1', port: 0});
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   return {
@@ -242,6 +243,8 @@ async function shown(stand: Stand, entry: Entry, check: object, reading: Reading
     fresh: dot.warn ? 'warn' : dot.pulsing ? 'pulse' : dot.fresh === 0 ? 'grey' : `fading, ${dot.fresh}`,
     agents: source.sessions.length,
     drawn: drawn(source.sessions),
+    cadence: cadenceOf(source, now)?.when ?? null,
+    why: cadenceOf(source, now)?.why,
   };
   const id = 'window' in card ? card.window : 'forecast' in card ? card.forecast : null;
   const live = id === null ? undefined : source.windows.find(w => w.id === id);
@@ -296,12 +299,20 @@ async function shown(stand: Stand, entry: Entry, check: object, reading: Reading
 
 const clock = (t: number) => `start + ${Math.floor(t / 3_600_000)}h ${Math.floor((t % 3_600_000) / MIN)}m ${(t % MIN) / 1000}s`;
 
-/** Checks every code of `entries` whose span holds `t` (or all of them); returns what was wrong, and marks what was checked. */
-async function checkAll(stand: Stand, entries: Entry[], reading: Reading, t: number | null, checked: Set<string>): Promise<string[]> {
+/** A code of what the dot says of the next measurement: checked only where the machine asks at the hub's pace. */
+const paceCode = (check: object) => 'cadence' in check;
+
+/**
+ * Checks every code of `entries` whose span holds `t` (or all of them); returns what was
+ * wrong, and marks what was checked. `codes` picks which kinds: all but those of the pace,
+ * or only those.
+ */
+async function checkAll(stand: Stand, entries: Entry[], reading: Reading, t: number | null, checked: Set<string>, codes: 'pace' | 'rest' = 'rest'): Promise<string[]> {
   const wrong: string[] = [];
   for (const entry of entries) {
     for (const [i, check] of (entry.expect as Span[]).entries()) {
       if (t !== null && !within(check, t)) continue;
+      if (paceCode(check) !== (codes === 'pace')) continue;
       checked.add(`${entry.kind} ${entry.id} #${i}`);
       const values = await shown(stand, entry, check, reading);
       const claimed = Object.entries(check).filter(([key]) => key !== 'from' && key !== 'to' && key !== 'board');
@@ -375,6 +386,13 @@ test('the check of a set names a subscription without an account the hub would f
   const both: DemoSet = {...all, entries: all.entries.map(e => (e.kind === 'card' && e.id === 'antigravity-2' ? {...e, machines: [...e.machines, 'laptop']} : e))};
   const onLaptop = {...both, entries: both.entries.map(e => (e.kind === 'card' && e.id === 'antigravity' ? {...e, agents: [{...agent, machine: 'laptop'}]} : e))};
   assert.match(problems(onLaptop).join('\n'), /card antigravity: an agent on laptop, which the hub files under what that machine delivers/);
+});
+
+test('the check of a set names a card measured at the hub’s pace by more than one machine', () => {
+  const all = setOf('all');
+  const paced = (machines: string[]): DemoSet => ({...all, entries: all.entries.map(e => (e.kind === 'card' && e.id === 'paced-idle' ? {...e, machines} : e))});
+  assert.match(problems(paced(['pacer', 'laptop'])).join('\n'), /card paced-idle is measured at the hub's pace by one machine only/);
+  assert.deepEqual(problems(paced(['pacer'])), []);
 });
 
 test('machines say how long a measurement holds as the agent does: until the next one, a fifth more and a minute', () => {
@@ -451,12 +469,55 @@ test('every entry of the whole catalogue shows what it claims for twelve hours',
   }
 
   assert.deepEqual(wrong, [], `start ${new Date(start).toISOString()}`);
-  const codes = entries.flatMap(entry => entry.expect.map((_, i) => `${entry.kind} ${entry.id} #${i}`));
+  const codes = entries.flatMap(entry => entry.expect.flatMap((check, i) => (paceCode(check) ? [] : [`${entry.kind} ${entry.id} #${i}`])));
   assert.deepEqual(
     codes.filter(code => !checked.has(code)),
     [],
-    'every code is checked somewhere',
+    'every code is checked somewhere (those of the pace by the test below)',
   );
+});
+
+test('cards measured at the hub’s pace say when the next measurement comes and why', {timeout: 120_000}, async t => {
+  const all = setOf('all');
+  // Only them, so nothing else measured by the same machines moves their pace; people's
+  // projects go with the cards whose agents work on them.
+  const set: DemoSet = {
+    ...all,
+    entries: all.entries
+      .filter(e => e.kind !== 'card' || e.paced)
+      .map(e => (e.kind === 'person' ? {...e, expect: e.expect.filter(check => !('project' in check))} : e)),
+  };
+  const paced = set.entries.filter((e): e is Card => e.kind === 'card' && !!e.paced);
+  assert.ok(paced.length, 'the catalogue has cards measured at the hub’s pace');
+  const start = Math.floor(Date.now() / MIN) * MIN;
+  const {stand, hub} = await bringUp(t, set, start);
+  const live = new Live(stand, cadence, true);
+  const checks = paced.flatMap(card => card.expect.filter(paceCode) as Span[]);
+  const points = [...new Set(checks.flatMap(check => [check.from ?? 0, ((check.from ?? 0) + (check.to ?? HOLDS)) / 2, check.to ?? HOLDS]))].sort((a, b) => a - b);
+  const checked = new Set<string>();
+  const wrong: string[] = [];
+  // Time runs in steps of 15 seconds, as the machine asks, up to every point where the codes are read.
+  let at = 0;
+  for (const point of points) {
+    for (; at <= point; at += TICK) {
+      t.mock.timers.setTime(start + at);
+      await live.report(at, start + at);
+      await live.pace(at, start + at);
+    }
+    t.mock.timers.setTime(start + point);
+    const reading = new Reading(stand, start + point, new Map([[set.scene, await hub.told()]]));
+    wrong.push(...(await checkAll(stand, paced, reading, point, checked, 'pace')));
+  }
+  assert.deepEqual(wrong, [], `start ${new Date(start).toISOString()}`);
+  const codes = paced.flatMap(card => card.expect.flatMap((check, i) => (paceCode(check) ? [`card ${card.id} #${i}`] : [])));
+  assert.deepEqual(
+    codes.filter(code => !checked.has(code)),
+    [],
+    'every code of the pace is checked',
+  );
+  const shown = checks as {cadence: string; why: string}[];
+  for (const why of ['low', 'inUse', 'changed', 'idle', 'reset']) assert.ok(shown.some(c => c.why === why), `a card says ${why}`);
+  for (const when of ['nextIn', 'nextSoon']) assert.ok(shown.some(c => c.cadence === when), `a card says ${when}`);
 });
 
 test('the showcase comes up clean', {timeout: 60_000}, async t => {

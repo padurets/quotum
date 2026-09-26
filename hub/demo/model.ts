@@ -1,7 +1,8 @@
 import {createHash} from 'node:crypto';
 import {sourceId, type Provider} from '../server/domain/sources.js';
 import {subscriptionKey} from '../server/domain/ingest.js';
-import type {Level, ResetLine} from '../ui/lib/quota.js';
+import type {Cadence, Level, ResetLine} from '../ui/lib/quota.js';
+import type {CadenceWhy} from '../ui/lib/types.js';
 import type {Outlook, Spent} from '../ui/lib/forecast.js';
 import type {ResetLabel} from '../ui/lib/resets.js';
 import {DEFAULT_PLAN, weeklyPlanRemaining, type WeeklyPlan} from '../ui/lib/plan.js';
@@ -218,6 +219,8 @@ export type CardCheck = Span & {board?: string} & (
     | {forecast: string; outlook?: Outlook['key']; tone?: 'v-warn' | 'v-crit'; spent?: Spent['key']; plan?: 'ahead' | 'behind' | 'even' | 'none'}
     /** Something the chart marks on the card's source within the last 24 hours. */
     | {event: 'early_reset' | 'resets_granted'}
+    /** What the dot's tooltip says of the next measurement, while the card is measured at the hub's pace, and why. */
+    | {cadence: Cadence['when'] | null; why?: CadenceWhy}
     /** How many whole days back ‹ takes the chart from 30 days, step by step, on the card's board: where the history starts. */
     | {reachesBack: number}
   );
@@ -273,6 +276,11 @@ export type Card = {
   history: number;
   /** Measured every quarter of an hour, as an agent does a subscription nobody uses (eco mode). */
   eco?: boolean;
+  /**
+   * Measured live at the hub's pace, its one machine asking every 15 seconds (spec:
+   * Following the hub's pace); its dot then says when the next measurement comes.
+   */
+  paced?: boolean;
   windows: WindowAt[];
   /** Free resets at `t`: how many, and how many expire when (left out when not given). */
   resets?: (t: number) => {available: number; expiring?: {count: number; expiresAt: number | null}[]};
@@ -538,6 +546,8 @@ export function problems(set: DemoSet): string[] {
   }
   const sources = new Map<string, string>();
   for (const card of cards(set)) {
+    // Another machine's measurements would move the pace it shows.
+    if (card.paced && card.machines.length !== 1) found.push(`card ${card.id} is measured at the hub's pace by one machine only`);
     const holders = new Set(holdersOf(set, card));
     const shownOn = (board: string) => (known.has(board) ? holders.has(board) : !!card.on?.[board]);
     if (card.failure) {

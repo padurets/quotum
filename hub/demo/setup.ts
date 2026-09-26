@@ -185,12 +185,13 @@ export function viewOf(stand: Stand, key: string) {
 }
 
 /** How often each card is measured at `t` by a machine: the demo measures on the agent's schedule, the test faster or slower. */
-export type Cadence = (card: Card, machine: Machine, t: number) => number;
+export type Rhythm = (card: Card, machine: Machine, t: number) => number;
 
 /**
  * What the machines of a stand send as time goes on: their measurements on each card's
- * cadence while awake, their failures every five minutes, and their lists of running
- * agents. The demo's loop and the catalogue test both drive it.
+ * rhythm while awake, their failures every five minutes, and their lists of running
+ * agents. The demo's loop and the catalogue test both drive it. With `paced`, the cards
+ * measured at the hub's pace are left to `pace` instead.
  */
 export class Live {
   /** Up to when each machine has measured. */
@@ -198,21 +199,22 @@ export class Live {
 
   constructor(
     private readonly stand: Stand,
-    private readonly cadence: Cadence,
+    private readonly rhythm: Rhythm,
+    private readonly paced = false,
   ) {}
 
   /** Measurement times of a card by a machine in (from, to]: minutes on its cadence. */
   private times(card: Card, machine: Machine, from: number, to: number): number[] {
     const found: number[] = [];
     for (let t = Math.floor(from / MIN) * MIN + MIN; t <= to; t += MIN) {
-      if (t % this.cadence(card, machine, t) === 0) found.push(t);
+      if (t % this.rhythm(card, machine, t) === 0) found.push(t);
     }
     return found;
   }
 
   /** When a card is measured next after `t`. */
   private next(card: Card, machine: Machine, t: number): number {
-    for (let at = t + MIN; ; at += MIN) if (at % this.cadence(card, machine, at) === 0) return at - t;
+    for (let at = t + MIN; ; at += MIN) if (at % this.rhythm(card, machine, at) === 0) return at - t;
   }
 
   /** Every machine sends what it measured since last time, up to `t`; `now` is the hub's clock. */
@@ -223,7 +225,7 @@ export class Live {
       if (t <= from) continue;
       this.measured.set(machine.id, t);
       const snapshots = cards(set)
-        .filter(card => card.machines.includes(machine.id))
+        .filter(card => card.machines.includes(machine.id) && !(this.paced && card.paced))
         .flatMap(card =>
           this.times(card, machine, from, t)
             .filter(at => awake(machine, at) && delivered(card, at))
@@ -236,6 +238,27 @@ export class Live {
       for (let i = 0; i < Math.max(snapshots.length, failures.length ? 1 : 0); i += BATCH) {
         await agent.ingest(snapshots.slice(i, i + BATCH), i + BATCH >= snapshots.length ? failures : [], now);
       }
+    }
+  }
+
+  /**
+   * Every machine awake asks the hub about its cards measured at the hub's pace, in one
+   * check-in as agents do every 15 seconds, and delivers those it is told to measure,
+   * promising the next as the hub did.
+   */
+  async pace(t: number, now: number) {
+    const {set, start} = this.stand;
+    for (const machine of machines(set)) {
+      const paced = cards(set).filter(card => card.paced && card.machines[0] === machine.id && delivered(card, t));
+      if (!paced.length || !awake(machine, t)) continue;
+      const agent = this.stand.agents.get(machine.id)!;
+      const asks = paced.map(card => {
+        const {provider, account, accountName} = snapshot(card, start, t, MIN) as {provider: string; account?: string; accountName?: string};
+        return {provider, account, accountName, active: false};
+      });
+      const {subscriptions} = await agent.checkin(asks);
+      const told = paced.flatMap((card, i) => (subscriptions[i].measure && subscriptions[i].nextInMs ? [snapshot(card, start, t, subscriptions[i].nextInMs)] : []));
+      if (told.length) await agent.ingest(told, [], now);
     }
   }
 

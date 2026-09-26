@@ -13,24 +13,51 @@ use ureq::{Body, ResponseExt};
 
 use crate::config::Hub;
 use crate::model::{
-    Batch, ErrorKind, Failure, INGEST_VERSION, Machine, Millis, Outcome, Provider, RunningSession, Snapshot, now_ms,
-    parse_time, ts,
+    Batch, ErrorKind, Failure, INGEST_VERSION, Machine, Millis, Outcome, Provider, RunningSession, STALE_LIMIT_MS,
+    Snapshot, now_ms, parse_time, ts,
 };
+
+/// One subscription this device could measure now, as a check-in asks about it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask<'a> {
+    pub provider: Provider,
+    pub account: Option<&'a str>,
+    pub account_name: Option<&'a str>,
+    /// Whether the client was used on this machine since the last question.
+    pub active: bool,
+    /// The most often this device agrees to measure it, when set.
+    pub min_interval_ms: Option<u64>,
+}
+
+/// What the hub answered about one subscription (spec: Asking whether to measure).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Directive {
+    /// Measure now; `paced` when the hub sets the pace.
+    Measure { paced: Option<Paced> },
+    /// Do not measure before `ask_at`, then ask again; `on_duty` when this device is on duty.
+    Wait { ask_at: Millis, on_duty: bool },
+    /// The hub did not answer.
+    Unanswered,
+}
+
+/// The hub's pace: ask again at `ask_at`; the next measurement comes within `next_in_ms` after this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Paced {
+    pub ask_at: Millis,
+    pub next_in_ms: u64,
+}
 
 pub trait Sink {
     fn deliver(&mut self, outcome: &Outcome);
 
-    /// Asks whether this device should measure a subscription now. `Some(until)` means
-    /// another device is on duty: wait until then. Without a hub, always measure.
-    fn checkin(
-        &mut self,
-        _provider: Provider,
-        _account: Option<&str>,
-        _account_name: Option<&str>,
-        _active: bool,
-    ) -> Option<Millis> {
-        None
+    /// Asks the hub, in one request, whether this device should measure each of the
+    /// subscriptions now; one directive for each, in order. Without a hub, always measure.
+    fn checkin(&mut self, asks: &[Ask]) -> Vec<Directive> {
+        asks.iter().map(|_| Directive::Measure { paced: None }).collect()
     }
+
+    /// Sends the measurements kept for later, when the hub answers again.
+    fn flush(&mut self) {}
 
     /// Whether the hub is to be told which coding agents run here (there is one, it knows
     /// that request, and it has not refused this device).
@@ -72,7 +99,8 @@ const ROUND_REQUESTS: usize = 64;
 const RETRY_FIRST: Duration = Duration::from_secs(60);
 const RETRY_LAST: Duration = Duration::from_secs(3600);
 const AGENT: &str = concat!("quotum/", env!("CARGO_PKG_VERSION"));
-/// Telling the hub which agents run is quick or not done: it must not hold up measuring.
+/// Asking the hub and telling it which agents run are quick or not done: they must not hold up measuring.
+const CHECKIN_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSIONS_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSIONS_RETRY: Duration = Duration::from_secs(60);
 /// A hub that does not know the request yet (older than the agent) is asked again this much later: it may be upgraded.
@@ -308,24 +336,9 @@ impl HubSink {
         self.failures += 1;
         self.retry_at = Some(Instant::now() + retry_wait(self.failures));
     }
-}
 
-impl Sink for HubSink {
-    fn deliver(&mut self, outcome: &Outcome) {
-        match outcome {
-            Ok(snapshot) => self.spool.push_back(Item::Snapshot(snapshot.clone())),
-            // What is not installed here is none of the hub's business.
-            Err(failure) if failure.error == ErrorKind::NotInstalled => {}
-            Err(failure) => self.spool.push_back(Item::Failure(failure.clone())),
-        }
-        while self.spool.len() > SPOOL_LIMIT {
-            self.spool.pop_front();
-        }
-        if self.refused.is_some() || self.resting() {
-            self.save_spool();
-            return;
-        }
-        let had_backlog = self.spool.len() > 1;
+    /// Sends the spool, oldest first; `had_backlog` when it was kept on disk before.
+    fn send(&mut self, had_backlog: bool) {
         let mut problem = None;
         // A refused piece is halved until the measurement the hub will not take is
         // found and dropped alone; accepted pieces grow back to the full size.
@@ -368,53 +381,102 @@ impl Sink for HubSink {
         }
         self.report(problem);
     }
+}
 
-    fn checkin(
-        &mut self,
-        provider: Provider,
-        account: Option<&str>,
-        account_name: Option<&str>,
-        active: bool,
-    ) -> Option<Millis> {
-        // While the hub is not answering, measure without asking: nothing is lost by it.
-        if self.refused.is_some() || self.resting() {
-            return None;
+impl Sink for HubSink {
+    fn deliver(&mut self, outcome: &Outcome) {
+        match outcome {
+            Ok(snapshot) => self.spool.push_back(Item::Snapshot(snapshot.clone())),
+            // What is not installed here is none of the hub's business.
+            Err(failure) if failure.error == ErrorKind::NotInstalled => {}
+            Err(failure) => self.spool.push_back(Item::Failure(failure.clone())),
         }
+        while self.spool.len() > SPOOL_LIMIT {
+            self.spool.pop_front();
+        }
+        if self.refused.is_some() || self.resting() {
+            self.save_spool();
+            return;
+        }
+        let had_backlog = self.spool.len() > 1;
+        self.send(had_backlog);
+    }
+
+    fn checkin(&mut self, asks: &[Ask]) -> Vec<Directive> {
+        let unanswered = vec![Directive::Unanswered; asks.len()];
+        if self.refused.is_some() {
+            return unanswered;
+        }
+        let subscriptions: Vec<Value> = asks
+            .iter()
+            .map(|ask| {
+                let mut subscription = serde_json::json!({
+                    "provider": ask.provider,
+                    "account": ask.account,
+                    "accountName": ask.account_name,
+                    "active": ask.active,
+                });
+                if let Some(ms) = ask.min_interval_ms {
+                    subscription["minIntervalMs"] = ms.into();
+                }
+                subscription
+            })
+            .collect();
         let request = serde_json::json!({
             "version": INGEST_VERSION,
             "agent": AGENT,
+            "paced": true,
             "machine": self.machine,
-            "subscriptions": [{"provider": provider, "account": account, "accountName": account_name, "active": active}],
+            "subscriptions": subscriptions,
         });
         let url = format!("{}/v1/checkin", self.base);
-        let answer =
-            self.http.post(&url).header("Authorization", &format!("Bearer {}", self.token)).send_json(&request);
+        let answer = self
+            .http
+            .post(&url)
+            .config()
+            .timeout_global(Some(CHECKIN_TIMEOUT))
+            .build()
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .send_json(&request);
+        // A question the hub did not answer is asked again soon; it does not hold back delivery.
         let mut response = match answer {
             Ok(response) => response,
             Err(e) => {
                 self.report(Some(format!("the hub is unreachable: {e}")));
-                self.back_off();
-                return None;
+                return unanswered;
             }
         };
         match trouble(&mut response) {
             None => {}
             Some(Trouble::Refused(reason)) => {
                 self.refused = Some(reason);
-                return None;
+                return unanswered;
             }
             Some(Trouble::Rejected(reason) | Trouble::Later(reason)) => {
                 self.report(Some(reason));
-                self.back_off();
-                return None;
+                return unanswered;
             }
         }
-        let body: Value = response.body_mut().read_json().ok()?;
-        let directive = &body["subscriptions"][0];
-        if directive["measure"] != false {
-            return None;
+        let Ok(body) = response.body_mut().read_json::<Value>() else {
+            self.report(Some("the hub answered a check-in with something else than JSON".into()));
+            return unanswered;
+        };
+        let Some(directives) = body["subscriptions"].as_array().filter(|list| list.len() == asks.len()) else {
+            self.report(Some("the hub answered a check-in about other subscriptions".into()));
+            return unanswered;
+        };
+        // The hub answers: whatever was kept for it may go now.
+        self.failures = 0;
+        self.retry_at = None;
+        self.report(None);
+        let now = now_ms();
+        directives.iter().map(|directive| read_directive(directive, now)).collect()
+    }
+
+    fn flush(&mut self) {
+        if !self.spool.is_empty() && self.refused.is_none() && !self.resting() {
+            self.send(true);
         }
-        directive["until"].as_str().and_then(parse_time)
     }
 
     fn takes_sessions(&self) -> bool {
@@ -477,6 +539,31 @@ impl Sink for HubSink {
 
     fn refused(&self) -> Option<&str> {
         self.refused.as_deref()
+    }
+}
+
+/// A promise of the next measurement the agent can keep (spec: `nextInMs`): its
+/// `staleAfterMs` stays within what a hub takes.
+const NEXT_IN_MS: std::ops::RangeInclusive<u64> = 60_000..=71_950_000;
+
+/// One subscription of a check-in's answer. An element with `askInMs` follows the hub's
+/// pace; any other is read as a hub without it answers: measure, or wait until `until`.
+fn read_directive(directive: &Value, now: Millis) -> Directive {
+    let measure = directive["measure"] != false;
+    if let Some(ask_in) = directive["askInMs"].as_u64() {
+        let ask_at = now + ask_in.min(STALE_LIMIT_MS) as Millis;
+        if !measure {
+            return Directive::Wait { ask_at, on_duty: directive["onDuty"] == true };
+        }
+        let paced = directive["nextInMs"]
+            .as_u64()
+            .filter(|ms| NEXT_IN_MS.contains(ms))
+            .map(|next_in_ms| Paced { ask_at, next_in_ms });
+        return Directive::Measure { paced };
+    }
+    match directive["until"].as_str().and_then(parse_time) {
+        Some(until) if !measure => Directive::Wait { ask_at: until, on_duty: false },
+        _ => Directive::Measure { paced: None },
     }
 }
 
@@ -595,6 +682,153 @@ mod tests {
         assert!(agent("https://quotum.example.com", dead).config().proxy().is_some(), "others go through the proxy");
     }
 
+    fn ask(provider: Provider, account: Option<&str>) -> Ask<'_> {
+        Ask { provider, account, account_name: None, active: false, min_interval_ms: None }
+    }
+
+    #[test]
+    fn a_check_in_asks_about_every_provider_at_once_and_reads_the_hub_s_pace() {
+        let (url, seen) = hub(|_, _| {
+            json(
+                200,
+                json!({"subscriptions": [
+                    {"provider": "codex", "measure": true, "onDuty": true, "until": "2026-09-26T10:00:15Z", "askInMs": 15000, "nextInMs": 240000},
+                    {"provider": "claude", "measure": false, "onDuty": true, "until": "2026-09-26T10:00:15Z", "askInMs": 12000},
+                    {"provider": "antigravity", "measure": false, "onDuty": false, "until": "2026-09-26T10:10:00Z", "askInMs": 600000},
+                ]}),
+            )
+        });
+        let (mut sink, _) = sink(&url, "paced");
+        let asks = [
+            ask(Provider::Codex, Some("41ab")),
+            Ask { active: true, min_interval_ms: Some(300_000), ..ask(Provider::Claude, Some("9c1e")) },
+            Ask { account_name: Some("work"), ..ask(Provider::Antigravity, None) },
+        ];
+        let before = now_ms();
+        let directives = sink.checkin(&asks);
+        let after = now_ms();
+        let (_, body) = seen.lock().unwrap()[0].clone();
+        assert_eq!(body["paced"], true);
+        assert_eq!(
+            body["subscriptions"],
+            json!([
+                {"provider": "codex", "account": "41ab", "accountName": null, "active": false},
+                {"provider": "claude", "account": "9c1e", "accountName": null, "active": true, "minIntervalMs": 300000},
+                {"provider": "antigravity", "account": null, "accountName": "work", "active": false},
+            ]),
+            "the least interval only where it is set"
+        );
+        let Directive::Measure { paced: Some(paced) } = directives[0] else { panic!("{directives:?}") };
+        assert_eq!(paced.next_in_ms, 240_000);
+        assert!((before + 15_000..=after + 15_000).contains(&paced.ask_at), "by this machine's clock");
+        let Directive::Wait { ask_at, on_duty: true } = directives[1] else { panic!("{directives:?}") };
+        assert!((before + 12_000..=after + 12_000).contains(&ask_at));
+        assert!(matches!(directives[2], Directive::Wait { on_duty: false, .. }));
+    }
+
+    #[test]
+    fn a_promise_past_what_a_hub_takes_is_no_pace() {
+        let read = |next_in: u64| read_directive(&json!({"measure": true, "askInMs": 15000, "nextInMs": next_in}), 0);
+        assert!(matches!(read(71_950_000), Directive::Measure { paced: Some(_) }));
+        assert_eq!(read(71_950_001), Directive::Measure { paced: None }, "measured on its own rhythm");
+        assert_eq!(read(u64::MAX), Directive::Measure { paced: None });
+    }
+
+    #[test]
+    fn an_answer_without_the_pace_is_read_as_before() {
+        let now = 1_000;
+        let read = |value: Value| read_directive(&value, now);
+        let until = "2026-09-26T10:00:00Z";
+        assert_eq!(read(json!({"measure": true, "until": until})), Directive::Measure { paced: None });
+        assert_eq!(
+            read(json!({"measure": false, "until": until})),
+            Directive::Wait { ask_at: parse_time(until).unwrap(), on_duty: false }
+        );
+        assert_eq!(read(json!({"measure": false})), Directive::Measure { paced: None }, "no time to wait for");
+        assert_eq!(
+            read(json!({"measure": true, "askInMs": 15000})),
+            Directive::Measure { paced: None },
+            "no promise: measure on its own rhythm"
+        );
+        assert_eq!(
+            read(json!({"measure": true, "askInMs": 15000, "nextInMs": 30000})),
+            Directive::Measure { paced: None }
+        );
+        assert_eq!(read(json!({"measure": true, "askInMs": -1, "until": until})), Directive::Measure { paced: None });
+        assert_eq!(
+            read(json!({"measure": false, "askInMs": 15000, "onDuty": "yes", "until": until})),
+            Directive::Wait { ask_at: now + 15_000, on_duty: false },
+            "on duty only when it says so"
+        );
+    }
+
+    #[test]
+    fn a_check_in_the_hub_does_not_answer_is_asked_again_and_holds_back_no_delivery() {
+        // A hub that fails every request, then answers again.
+        let answers = Arc::new(AtomicBool::new(false));
+        let now_answers = answers.clone();
+        let (url, seen) = hub(move |path, body| {
+            if !now_answers.load(Ordering::SeqCst) {
+                return json(503, json!({"error": "unavailable"}));
+            }
+            match path {
+                "/v1/checkin" => {
+                    let count = body["subscriptions"].as_array().unwrap().len();
+                    json(
+                        200,
+                        json!({"subscriptions": vec![json!({"provider": "codex", "measure": false, "onDuty": true, "until": "2026-09-26T10:00:15Z", "askInMs": 15000}); count]}),
+                    )
+                }
+                _ => json(200, json!({"accepted": 1, "duplicates": 0})),
+            }
+        });
+        let (mut kept, _) = sink(&url, "unanswered");
+        let asks = [ask(Provider::Codex, Some("41ab")), ask(Provider::Claude, Some("9c1e"))];
+        assert_eq!(kept.checkin(&asks), [Directive::Unanswered, Directive::Unanswered]);
+        assert!(kept.retry_at.is_none() && kept.failures == 0, "a failed check-in holds back no delivery");
+        kept.deliver(&failed("x"));
+        assert!(kept.resting(), "a failed delivery does");
+        assert_eq!(kept.checkin(&asks), [Directive::Unanswered; 2], "asked anyway");
+        assert_eq!(seen.lock().unwrap().len(), 3);
+
+        // The hub answers again: the check-in ends the rest, and what was kept goes at once.
+        answers.store(true, Ordering::SeqCst);
+        assert!(matches!(kept.checkin(&asks)[0], Directive::Wait { on_duty: true, .. }));
+        assert!(!kept.resting());
+        kept.flush();
+        let _ = fs::remove_file(&kept.spool_file);
+        assert!(kept.spool.is_empty(), "delivered");
+        assert_eq!(seen.lock().unwrap().last().unwrap().0, "/v1/ingest");
+
+        // Something else than an answer to what was asked is no answer.
+        for answer in [json!({"subscriptions": []}), json!({"ok": true})] {
+            let (url, _) = hub(move |_, _| json(200, answer.clone()));
+            let (mut odd, _) = sink(&url, "odd");
+            assert_eq!(odd.checkin(&asks), [Directive::Unanswered; 2]);
+        }
+        let (url, _) = hub(|_, _| (200, "content-type: text/html\r\n", "<!doctype html>".into()));
+        let (mut page, _) = sink(&url, "page");
+        assert_eq!(page.checkin(&asks), [Directive::Unanswered; 2]);
+    }
+
+    #[test]
+    fn a_hub_that_does_not_answer_a_check_in_in_five_seconds_is_not_waited_for() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // Takes the connection and never answers.
+        thread::spawn(move || {
+            let kept: Vec<_> = listener.incoming().take(1).collect();
+            thread::sleep(Duration::from_secs(30));
+            drop(kept);
+        });
+        let (mut sink, _) = sink(&url, "silent");
+        let started = Instant::now();
+        assert_eq!(sink.checkin(&[ask(Provider::Codex, None)]), [Directive::Unanswered]);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_secs(4) && took < Duration::from_secs(10), "{took:?}");
+        assert!(sink.retry_at.is_none(), "a silent hub is asked again all the same");
+    }
+
     fn failed(detail: &str) -> Outcome {
         Err(Failure::new(Provider::Codex, ErrorKind::Failed, detail))
     }
@@ -644,7 +878,7 @@ mod tests {
         for code in ["device_revoked", "device_conflict"] {
             let (url, _) = hub(move |_, _| json(403, json!({"error": code})));
             let (mut stopped, _) = sink(&url, code);
-            assert_eq!(stopped.checkin(Provider::Antigravity, None, Some("work"), false), None);
+            assert_eq!(stopped.checkin(&[ask(Provider::Antigravity, None)]), [Directive::Unanswered]);
             assert!(stopped.refused().is_some(), "{code}");
         }
     }
@@ -660,8 +894,7 @@ mod tests {
             _ => (200, "content-type: text/html; charset=utf-8\r\n", "<!doctype html><title>Sign in</title>".into()),
         });
         let (mut sink, log) = sink(&url, "sign-in");
-        assert_eq!(sink.checkin(Provider::Claude, Some("a"), None, true), None, "measures anyway");
-        sink.retry_at = None;
+        assert_eq!(sink.checkin(&[ask(Provider::Claude, Some("a"))]), [Directive::Unanswered]);
         sink.deliver(&failed("x"));
         let _ = fs::remove_file(&sink.spool_file);
 

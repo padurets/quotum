@@ -176,11 +176,12 @@ async function main() {
     const stand = await setUp(address.base, set, start, SETUP_CODE, () => Date.now());
     await selfCheck(stand, trackers);
 
-    const live = new Live(stand, card => liveStep(card));
+    const live = new Live(stand, card => liveStep(card), true);
     const tick = async () => {
       const t = Date.now() - start;
       try {
         await live.report(t, Date.now());
+        await live.pace(t, Date.now());
         await live.measure(t, Date.now());
       } catch (error) {
         await settled();

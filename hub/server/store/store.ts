@@ -158,6 +158,12 @@ export class Store {
     return row?.id ?? null;
   }
 
+  /** The account key of a source. */
+  account(id: string): string | null {
+    const row = this.db.prepare('SELECT account FROM sources WHERE id = ?').get(id) as {account: string} | undefined;
+    return row?.account ?? null;
+  }
+
   source(provider: Provider, account: string, now: number): string {
     const row = this.db.prepare('SELECT id FROM sources WHERE provider = ? AND account = ?').get(provider, account) as {id: string} | undefined;
     if (row) return row.id;

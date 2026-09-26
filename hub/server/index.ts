@@ -7,6 +7,7 @@ import {ResetFeed} from './resets.js';
 import {buildApp} from './api.js';
 import {Ingest} from './ingest.js';
 import {Duty} from './duty.js';
+import {Cadence} from './cadence.js';
 import {Pairing} from './pairing.js';
 import {Directory} from './store/directory.js';
 import {Setup} from './setup.js';
@@ -36,7 +37,7 @@ const directory = new Directory(store.db);
 if (local) bootstrapLocal(directory, local.token, Date.now());
 const resets = new ResetFeed((provider, reset) => store.announce(provider, reset));
 const setup = new Setup(!local && directory.userCount() === 0, config.auth.setupCode);
-const ingest = new Ingest(store, directory, new Duty());
+const ingest = new Ingest(store, directory, new Duty(), new Cadence());
 const app = await buildApp({store, directory, resets, ingest, pairing: new Pairing(directory), setup, local: local && {key: local.key}});
 
 let closing = false;

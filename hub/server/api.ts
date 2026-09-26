@@ -1,3 +1,5 @@
+import {STATUS_CODES} from 'node:http';
+import type {Socket} from 'node:net';
 import Fastify, {type FastifyReply, type FastifyRequest} from 'fastify';
 import staticFiles from '@fastify/static';
 import {config, serviceName, version} from './config.js';
@@ -50,6 +52,30 @@ function errorCode(status: number, path: string): string {
 }
 
 /**
+ * A request that never got as far as the hub's handlers (it took too long to arrive, its
+ * headers were too large or it was not HTTP), answered in the hub's `{error}` shape
+ * rather than the framework's, and its connection closed.
+ */
+function clientError(error: NodeJS.ErrnoException, socket: Socket & {_httpMessage?: {headersSent: boolean} | null}) {
+  // A connection the other side reset has nothing left to answer.
+  if (error.code === 'ECONNRESET' || socket.destroyed) return;
+  const [status, code] =
+    error.code === 'ERR_HTTP_REQUEST_TIMEOUT'
+      ? [408, 'request_timeout']
+      : error.code === 'HPE_HEADER_OVERFLOW'
+        ? [431, 'headers_too_large']
+        : [400, 'invalid_request'];
+  const body = JSON.stringify({error: code});
+  // As Node does: an answer already on its way is cut short rather than spliced with this one.
+  if (socket.writable && !socket._httpMessage?.headersSent) {
+    socket.write(
+      `HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+    );
+  }
+  socket.destroy(error);
+}
+
+/**
  * The cell a period of `span` is drawn on: the finest that keeps it within `maxCells`, a
  * little over the count rather than a three times coarser grid for a day over a month.
  */
@@ -82,7 +108,16 @@ function selected(from: string | undefined, to: string | undefined, now: number)
  */
 export async function buildApp(hub: Hub) {
   const {store, directory, resets} = hub;
-  const app = Fastify({logger: false, bodyLimit: 16 * 1024, trustProxy: config.http.trustProxy});
+  const {requestTimeoutMs, checkMs} = config.http;
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 16 * 1024,
+    trustProxy: config.http.trustProxy,
+    requestTimeout: requestTimeoutMs,
+    // Once the headers are in, Node holds a request to the longer of its two limits (the headers' is 60 seconds by default).
+    http: {headersTimeout: requestTimeoutMs, connectionsCheckingInterval: checkMs},
+    clientErrorHandler: clientError,
+  });
   const hosts = new Set<string>(config.http.hosts);
   const anyHost = hosts.has('*');
   type Answer = {series: HistorySeries[]; events: SourceEvent[]};
@@ -197,6 +232,8 @@ export async function buildApp(hub: Hub) {
             source.holders.filter(id => members.has(id)),
             now,
           ),
+          /** When it is measured next and why, while its holder follows the hub's pace. */
+          cadence: hub.ingest.nextMeasurement(source.id, source.account, now),
         };
       }),
     };

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use quotum_core::config::Config;
 use quotum_core::model::Provider;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 /// What the board may change: nothing else (not a client's path, not a hub).
@@ -26,9 +26,17 @@ pub struct Patch {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProviderPatch {
     pub enabled: Option<bool>,
-    pub interval_s: Option<u64>,
+    /// Seconds; `null` takes the provider's own interval out (the hub then measures it as
+    /// often as needed, or as set for all). Left out, the interval stays as it is.
+    #[serde(default, deserialize_with = "present")]
+    pub interval_s: Option<Option<u64>>,
     /// The name of the subscription (Antigravity); empty removes it.
     pub account: Option<String>,
+}
+
+/// A field that is there, `null` included: told apart from one left out (`#[serde(default)]`).
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<u64>>, D::Error> {
+    Option::<u64>::deserialize(deserializer).map(Some)
 }
 
 /// `text` with the patch applied, checked as the agent checks the file when it reads it.
@@ -55,8 +63,16 @@ pub fn apply(text: &str, patch: &Patch) -> Result<String, String> {
         if let Some(enabled) = change.enabled {
             table["enabled"] = value(enabled);
         }
-        if let Some(seconds) = change.interval_s {
-            table["interval"] = value(i64::try_from(seconds).map_err(|_| "the interval is too long".to_string())?);
+        match change.interval_s {
+            Some(Some(seconds)) => {
+                table["interval"] = value(i64::try_from(seconds).map_err(|_| "the interval is too long".to_string())?)
+            }
+            Some(None) => {
+                if let Some(table) = table.as_table_like_mut() {
+                    table.remove("interval");
+                }
+            }
+            None => {}
         }
         match change.account.as_deref().map(str::trim) {
             Some("") => {
@@ -317,6 +333,24 @@ mod tests {
         assert_eq!(config.hub.unwrap().url, "https://q.example");
         let cleared = apply(&changed, &patch(r#"{"providers":{"antigravity":{"account":" "}}}"#)).unwrap();
         assert_eq!(Config::parse(&cleared).unwrap().account_name(Provider::Antigravity), None);
+    }
+
+    #[test]
+    fn an_interval_set_to_null_is_taken_out_and_one_left_out_stays() {
+        let text = "[providers.codex]\ninterval = 600\n";
+        let auto = apply(text, &patch(r#"{"providers":{"codex":{"intervalS":null}}}"#)).unwrap();
+        assert_eq!(Config::parse(&auto).unwrap().min_interval_ms(Provider::Codex), None, "{auto}");
+        let set = apply(&auto, &patch(r#"{"providers":{"codex":{"intervalS":120}}}"#)).unwrap();
+        assert_eq!(Config::parse(&set).unwrap().min_interval_ms(Provider::Codex), Some(120_000));
+        assert_eq!(
+            apply(text, &patch(r#"{"providers":{"codex":{"enabled":true}}}"#)).unwrap(),
+            "[providers.codex]\ninterval = 600\nenabled = true\n"
+        );
+        assert_eq!(
+            patch(r#"{"providers":{"codex":{}}}"#).providers[&Provider::Codex],
+            ProviderPatch::default(),
+            "nothing asked"
+        );
     }
 
     #[test]

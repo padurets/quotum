@@ -137,6 +137,13 @@ export class Agent {
     return (await call<{accepted: number; duplicates: number; failures: number}>(this.base, 'POST', '/v1/ingest', {body, token: this.token})).body;
   }
 
+  /** Asks whether to measure its subscriptions now, following the hub's pace (spec: Asking whether to measure). */
+  async checkin(subscriptions: object[]) {
+    const body = {version: 1, agent: Agent.VERSION, paced: true, machine: this.machine, subscriptions};
+    type Told = {provider: string; measure: boolean; onDuty?: boolean; askInMs?: number; nextInMs?: number};
+    return (await call<{subscriptions: Told[]}>(this.base, 'POST', '/v1/checkin', {body, token: this.token})).body;
+  }
+
   /** Tells the hub the machine's whole list of running agents, as of now. */
   async sessions(sessions: object[], now: number) {
     const body = {version: 1, agent: Agent.VERSION, machine: this.machine, sentAt: new Date(now).toISOString(), sessions};

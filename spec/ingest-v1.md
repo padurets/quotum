@@ -146,8 +146,12 @@ duplicate, so resending a batch after a lost answer is safe.
 | `401` | Unknown token | Keep the data, retry later, less and less often |
 | `403` | `device_revoked`: this device was removed, or the token it delivers with was revoked. `device_conflict`: the machine is connected with a code already, and a machine token cannot take it over | Stop: nothing will be accepted from it again |
 | `403` with another code | Something in front of the hub refused the request | Keep the data, retry later |
+| `408` | `request_timeout`: the request did not arrive in full within 30 seconds | Keep the data, retry later, as for network errors |
 | `413` | Body too large | Drop it, or split it as for `400` |
 | `5xx`, network errors | Hub unavailable | Keep the data, retry later, less and less often |
+
+The hub checks the token before it reads the body: `401` and `403 device_revoked` may come
+before the agent has sent all of it.
 
 Errors always come as `{"error": "<code>"}`, never with internal messages. The API never
 redirects and always answers with JSON: a redirect or a web page means something else
@@ -180,6 +184,11 @@ Authorization: Bearer <token>
 snapshot, as far as the agent knows them before measuring. `active` says whether someone
 is using that client on this machine right now. At most 16 subscriptions.
 
+An agent that follows the hub's pace (see below) adds `"paced": true` at the top level,
+and to a subscription `minIntervalMs`, the most often it agrees to measure it (a whole
+number from 60 000 to 86 400 000), when its person set one. A hub answers
+`400 invalid_request` to either field of another type or out of range.
+
 `200` with, in the same order:
 
 ```json
@@ -197,6 +206,52 @@ its last measurement goes stale; asking again does not extend a holder's time, o
 delivering does. Errors are as for ingest (`400 invalid_request`, `401`, `403`). An agent
 that cannot reach the hub, or gets any other answer, measures anyway: at worst two
 devices measure the same subscription for a while.
+
+### Following the hub's pace
+
+With `"paced": true` the hub also decides when the device on duty measures, from what it
+sees of the subscription everywhere: how much is left, whether its coding agents work on
+any machine, whether its numbers just changed, when a window resets. The device asks
+again when told, on duty too (every 15 seconds or so, one request for all its
+subscriptions, without starting a client), and measures only when told. Each answer
+also has:
+
+| Field | Meaning |
+|---|---|
+| `onDuty` | This device is on duty for the subscription |
+| `askInMs` | Ask again this many milliseconds after the answer arrived. Always there |
+| `nextInMs` | With `measure: true` only: the next measurement comes no later than this long after this one (after its `observedAt`), 60 000 to 71 950 000 |
+
+```json
+{"subscriptions": [
+  {"provider": "claude", "measure": false, "onDuty": true, "until": "2026-09-26T10:00:15Z", "askInMs": 15000},
+  {"provider": "codex", "measure": true, "onDuty": true, "until": "2026-09-26T10:00:15Z", "askInMs": 15000, "nextInMs": 240000}
+]}
+```
+
+- `measure: true`: measure now and deliver, promising the next measurement within
+  `nextInMs`: its `staleAfterMs` is `nextInMs × 1.2 + 60 000` (at most a day).
+- `measure: false, onDuty: true`: on duty, but not time yet; ask again in `askInMs`.
+- `measure: false, onDuty: false`: another device measures it; ask again in `askInMs`.
+
+Times in these fields are durations, not moments, so a device whose clock is off still
+waits as long as it is told. The hub measures a subscription with any window at 10% or
+less, above 0, every minute while it was active within the last hour (its numbers changed or it was
+in use), every 2 minutes after an hour of quiet and every 5 minutes after three; one in
+use, or whose numbers just changed, every 2 minutes; otherwise less and less often, up
+to every 15 minutes, and 30 seconds after a known reset. Never more often than a
+device's `minIntervalMs`, taken as at most 71 950 000 so that a measurement never goes
+stale before the next.
+
+A device whose measurements of a subscription fail delivers the failures as usual and
+keeps asking: the hub waits them out, longer each time in a row (15 minutes for
+`not_logged_in` and `unsupported`), and while it does, the device does not take duty;
+a healthy device takes it as before. Such a device on duty, or with no other device on
+duty, is answered `onDuty: true` until its pause is over.
+
+A paced device that gets no answer keeps asking every 15 seconds, and measures on its own
+once the hub has been silent for 4 minutes and the promised time has passed. An answer
+that does not have `askInMs` is read as one without `"paced"`.
 
 ## Reporting running agents
 
@@ -287,7 +342,12 @@ What is sent: the pseudonym of each account, the plan name, percentages and rese
 of the windows, free resets and when each expires, the client's version, the machine's random id, its name
 (the host name unless configured) and operating system, subscription names if
 configured, and for a failed measurement its kind and a short
-message of the client (at most 200 characters). About running agents (unless turned
+message of the client (at most 200 characters). With each check-in: whether the client is
+in use on the machine (on duty, as often as every 15 seconds), and how often at most the
+machine measures the subscription, if configured. Wherever the subscription is shown, by
+anyone who holds its account, the members of the board see whether it is in use right now
+(from that, and from the working agents of any machine), whatever the settings about
+running agents say. About running agents (unless turned
 off): which client, where it runs, since when, whether it works and when it last did,
 and the name of its project (the repository its folder is in, else the folder) and of
 its folder when that differs (unless that is turned off too). The members of a board

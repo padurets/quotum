@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {buildApp} from '../api.js';
 import {localMode} from '../config.js';
 import {Duty} from '../duty.js';
+import {Cadence} from '../cadence.js';
 import {Ingest} from '../ingest.js';
 import {bootstrapLocal} from '../local.js';
 import {Pairing} from '../pairing.js';
@@ -31,7 +32,7 @@ function database() {
       store,
       directory,
       resets: new ResetFeed(undefined, () => {}),
-      ingest: new Ingest(store, directory, new Duty()),
+      ingest: new Ingest(store, directory, new Duty(), new Cadence()),
       pairing: new Pairing(directory),
       setup: new Setup(!local && directory.userCount() === 0, 'BCDF-GHJK'),
       local: local ? {key} : null,

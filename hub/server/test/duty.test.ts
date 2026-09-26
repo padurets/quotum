@@ -4,6 +4,7 @@ import {mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {Duty} from '../duty.js';
+import {Cadence} from '../cadence.js';
 import {Ingest, type Credential} from '../ingest.js';
 import {Invalid} from '../domain/ingest.js';
 import {newSecret} from '../domain/auth.js';
@@ -65,7 +66,7 @@ test('an idle waiting device asks again in at most ten minutes', () => {
 test('check-ins are resolved per subscription, the owner’s own ones included', () => {
   const store = new Store(path.join(mkdtempSync(path.join(tmpdir(), 'quotum-duty-')), 'db.sqlite'), t0);
   const directory = new Directory(store.db);
-  const ingest = new Ingest(store, directory, new Duty());
+  const ingest = new Ingest(store, directory, new Duty(), new Cadence());
   const alice = directory.createUser('alice@example.com', 'Alice', 'x', t0);
   const secret = newSecret('qt_m');
   directory.createToken(secret, '…', alice.id, 'images', t0);

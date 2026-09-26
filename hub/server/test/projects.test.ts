@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {buildApp} from '../api.js';
 import {Duty} from '../duty.js';
+import {Cadence} from '../cadence.js';
 import {Ingest} from '../ingest.js';
 import {Pairing} from '../pairing.js';
 import {ResetFeed} from '../resets.js';
@@ -23,7 +24,7 @@ async function hub() {
     store,
     directory,
     resets: new ResetFeed(undefined, () => {}),
-    ingest: new Ingest(store, directory, new Duty()),
+    ingest: new Ingest(store, directory, new Duty(), new Cadence()),
     pairing: new Pairing(directory),
     setup: new Setup(true, SETUP),
     local: null,

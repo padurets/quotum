@@ -1,6 +1,7 @@
 import {secretKind} from './domain/auth.js';
 import {Invalid, parseBatch, parseCheckin, parseSessions, subscriptionKey, toMeasurement, type AgentSender} from './domain/ingest.js';
 import {Sessions} from './sessions.js';
+import {ACTIVE_WITHIN_MS, type Cadence, type Signals, type Why} from './cadence.js';
 import type {Duty} from './duty.js';
 import type {Provider} from './domain/sources.js';
 import type {Device, Directory, Token} from './store/directory.js';
@@ -8,7 +9,10 @@ import type {Store} from './store/store.js';
 
 export type IngestResult = {accepted: number; duplicates: number; failures: number; device: {id: string}};
 
-export type CheckinResult = {subscriptions: {provider: Provider; measure: boolean; until: string}[]};
+/** What a device is told of each subscription; a device following the hub's pace also learns whether it is on duty and when to ask again. */
+export type CheckinResult = {
+  subscriptions: {provider: Provider; measure: boolean; until: string; onDuty?: boolean; askInMs?: number; nextInMs?: number}[];
+};
 
 /** Who is delivering: a device with its own token, or a machine with its person's machine token. */
 export type Credential = {kind: 'device'; device: Device} | {kind: 'token'; token: Token};
@@ -37,6 +41,7 @@ export class Ingest {
     private readonly store: Store,
     private readonly directory: Directory,
     private readonly duty: Duty,
+    private readonly cadence: Cadence,
   ) {
     this.live = new Sessions(store);
   }
@@ -88,12 +93,16 @@ export class Ingest {
         this.store.record(source, {...toMeasurement(snapshot), observedAt});
         result.accepted++;
         this.duty.delivered(account, device.id, observedAt, snapshot.staleAfterMs, now);
+        this.cadence.delivered(account, device.id, snapshot.windows, observedAt, snapshot.staleAfterMs, this.signals(source, account, now).inUse, now);
       }
 
       for (const failure of batch.failures) {
         const at = failure.observedAt + skew;
-        this.store.deviceFailed(device.id, failure.provider, failure.error, failure.detail, at);
         const source = this.store.deviceSource(device.id, failure.provider);
+        // The device waits out its failures, whether or not another device measures the subscription fine.
+        const key = this.cadence.measuredBy(device.id, failure.provider) ?? (source && this.store.account(source));
+        if (key) this.cadence.failed(key, device.id, failure.error, at);
+        this.store.deviceFailed(device.id, failure.provider, failure.error, failure.detail, at);
         if (!source) continue;
         const state = this.store.state(source);
         // Another device may measure the same account fine; only a source gone quiet shows the problem.
@@ -105,15 +114,52 @@ export class Ingest {
     });
   }
 
-  /** Tells a device which of its subscriptions to measure now and when to ask again for the rest. */
+  /**
+   * Tells a device which of its subscriptions to measure now and when to ask again for the
+   * rest. A device following the hub's pace measures a subscription it is on duty for only
+   * when its pace says so, and does not take duty while it waits out its failures.
+   */
   checkin(credential: Credential, body: unknown, now = Date.now()): CheckinResult {
     const request = parseCheckin(body);
     const device = this.device(credential, request, now);
+    const iso = (ms: number) => new Date(ms).toISOString();
     return {
       subscriptions: request.subscriptions.map(s => {
-        const directive = this.duty.claim(subscriptionKey(s, device.userId), device.id, s.active, now);
-        return {provider: s.provider, measure: directive.measure, until: new Date(directive.until).toISOString()};
+        const key = subscriptionKey(s, device.userId);
+        if (!request.paced) {
+          const directive = this.duty.claim(key, device.id, s.active, now);
+          return {provider: s.provider, measure: directive.measure, until: iso(directive.until)};
+        }
+        const paused = this.cadence.pausedUntil(key, device.id, now);
+        const holder = this.duty.holder(key);
+        const leased = (this.duty.until(key) ?? 0) > now;
+        if (paused !== null && !(holder === device.id && leased)) {
+          // Another device measures it, or none does until this one's pause is over.
+          const askInMs = Math.ceil(Math.min(paused - now, 10 * 60_000));
+          return {provider: s.provider, measure: false, onDuty: !(holder !== null && holder !== device.id && leased), askInMs, until: iso(now + askInMs)};
+        }
+        const directive = this.duty.claim(key, device.id, s.active, now);
+        if (!directive.measure) {
+          return {provider: s.provider, measure: false, onDuty: false, askInMs: directive.until - now, until: iso(directive.until)};
+        }
+        const source = this.store.findSource(s.provider, key);
+        const answer = this.cadence.answer(key, device.id, s.provider, now, s.minIntervalMs, this.signals(source, key, now));
+        return {provider: s.provider, ...answer, until: iso(now + answer.askInMs)};
       }),
+    };
+  }
+
+  /** When a subscription is measured next and why, while its holder follows the hub's pace; null otherwise. */
+  nextMeasurement(source: string, key: string, now: number): {next: number; why: Why} | null {
+    return this.cadence.view(key, this.duty.holder(key), now, this.signals(source, key, now));
+  }
+
+  /** What the hub knows of a subscription now: its windows, and whether it is in use on any machine. */
+  private signals(source: string | null, key: string, now: number): Signals {
+    const activeAt = this.duty.activeAt(key);
+    return {
+      windows: source ? this.store.state(source).windows : [],
+      inUse: (source !== null && this.live.working(source, now)) || (activeAt !== null && now - activeAt <= ACTIVE_WITHIN_MS),
     };
   }
 

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {existsSync, mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import {PassThrough} from 'node:stream';
 import {buildApp} from '../api.js';
 import {config} from '../config.js';
 import {Duty} from '../duty.js';
+import {Cadence} from '../cadence.js';
 import {Ingest} from '../ingest.js';
 import {Pairing} from '../pairing.js';
 import {ResetFeed} from '../resets.js';
@@ -26,7 +28,7 @@ async function hub() {
     store,
     directory,
     resets: new ResetFeed(undefined, () => {}),
-    ingest: new Ingest(store, directory, new Duty()),
+    ingest: new Ingest(store, directory, new Duty(), new Cadence()),
     pairing: new Pairing(directory),
     setup: new Setup(true, SETUP),
     local: null,
@@ -369,6 +371,144 @@ test('agents get errors in the spec’s terms', async () => {
   assert.deepEqual([broken.status, broken.body], [400, {error: 'invalid_batch'}]);
   const wrong = await call('POST', '/v1/ingest', {body: {...batch('m-0123456789ab'), version: 2}, headers: auth});
   assert.deepEqual([wrong.status, wrong.body], [400, {error: 'invalid_batch', detail: 'version'}]);
+});
+
+test('a device following the hub’s pace is told when to ask again, and the card says when it measures next', async () => {
+  const {call, person} = await hub();
+  await person('alice');
+  const headers = {authorization: `Bearer ${(await call('POST', '/api/tokens', {as: 'alice', body: {}})).body.secret}`};
+  const checkin = (paced: unknown, change: object = {}) =>
+    call('POST', '/v1/checkin', {
+      body: {version: 1, agent: 'quotum/0.4.0', paced, machine: machine('m-0123456789ab'), subscriptions: [{provider: 'codex', account: 'a1b2c3d4e5f6a1b2c3d4e5f6', active: false, ...change}]},
+      headers,
+    });
+  const cadence = async () => (await call('GET', '/api/overview', {as: 'alice'})).body.sources[0]?.cadence;
+
+  const first = (await checkin(true)).body.subscriptions[0];
+  assert.deepEqual([first.measure, first.onDuty, first.askInMs, first.nextInMs], [true, true, 15_000, 240_000]);
+  const measured = Date.now() - 1000;
+  await call('POST', '/v1/ingest', {body: {...batch('m-0123456789ab'), snapshots: [{...snapshot(measured), staleAfterMs: 240_000 * 1.2 + 60_000}]}, headers});
+  const waiting = (await checkin(true)).body.subscriptions[0];
+  assert.deepEqual([waiting.measure, waiting.onDuty, waiting.nextInMs], [false, true, undefined]);
+  assert.ok(waiting.askInMs > 0 && waiting.askInMs <= 15_000);
+  assert.deepEqual(await cadence(), {next: measured + 120_000, why: 'idle'});
+
+  const plain = (await checkin(false)).body.subscriptions[0];
+  assert.deepEqual(Object.keys(plain), ['provider', 'measure', 'until'], 'without the pace, the answer is as before');
+  const bad = await checkin(true, {minIntervalMs: 30_000});
+  assert.deepEqual([bad.status, bad.body], [400, {error: 'invalid_request', detail: 'minIntervalMs'}]);
+  assert.deepEqual((await checkin('yes')).body, {error: 'invalid_request', detail: 'paced'});
+});
+
+test('an agent request without a valid token is refused before its body arrives', async t => {
+  const {app, call, person} = await hub();
+  await person('alice');
+  const revokedToken = (await call('POST', '/api/tokens', {as: 'alice', body: {}})).body;
+  await call('DELETE', `/api/tokens/${revokedToken.id}`, {as: 'alice'});
+  const started = (await call('POST', '/v1/device/code', {body: {machine: machine('laptop-0123456789ab'), agent: 'quotum/0.2.0'}})).body;
+  await call('POST', '/api/device/approve', {as: 'alice', body: {code: started.userCode}});
+  const revokedDevice = (await call('POST', '/v1/device/token', {body: {deviceCode: started.deviceCode}})).body.token;
+  const [device] = (await call('GET', '/api/devices', {as: 'alice'})).body;
+  await call('DELETE', `/api/devices/${device.id}`, {as: 'alice'});
+
+  /** Sends the start of a body that never ends; before the fix such a request waited for the rest for ever. */
+  const hanging = async (url: string, headers: Record<string, string>) => {
+    const body = new PassThrough();
+    t.after(() => body.destroy());
+    body.write('{"version": 1,');
+    const answer = app.inject({method: 'POST', url, payload: body, headers: {'content-type': 'application/json', ...headers}});
+    const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${url} waited for the body`)), 1000).unref());
+    const response = await Promise.race([answer, late]);
+    return [response.statusCode, JSON.parse(response.body).error];
+  };
+  for (const url of ['/v1/checkin', '/v1/sessions', '/v1/ingest']) {
+    assert.deepEqual(await hanging(url, {}), [401, 'unauthorized'], `${url} without a token`);
+    assert.deepEqual(await hanging(url, {authorization: 'Bearer qt_m_someone-elses-token-0123456789'}), [401, 'unauthorized'], `${url} with an unknown token`);
+    assert.deepEqual(await hanging(url, {authorization: `Bearer ${revokedToken.secret}`}), [403, 'device_revoked'], `${url} with a revoked token`);
+    assert.deepEqual(await hanging(url, {authorization: `Bearer ${revokedDevice}`}), [403, 'device_revoked'], `${url} from a removed device`);
+  }
+  assert.deepEqual(await hanging('/v1/ingest', {host: 'evil.example'}), [403, 'forbidden_host'], 'the host is checked first');
+});
+
+test('a device removed or a token revoked while its body arrives delivers nothing, nor does its old secret once it is connected anew', async t => {
+  const {app, call, person} = await hub();
+  await person('alice');
+  /** Connects a machine with a one-time code; returns its secret. */
+  const pair = async (id: string) => {
+    const started = (await call('POST', '/v1/device/code', {body: {machine: machine(id), agent: 'quotum/0.2.0'}})).body;
+    await call('POST', '/api/device/approve', {as: 'alice', body: {code: started.userCode}});
+    return (await call('POST', '/v1/device/token', {body: {deviceCode: started.deviceCode}})).body.token as string;
+  };
+  const removeDevice = async () => {
+    const [device] = (await call('GET', '/api/devices', {as: 'alice'})).body;
+    await call('DELETE', `/api/devices/${device.id}`, {as: 'alice'});
+  };
+  /** Sends the headers and half of a batch, lets `meanwhile` happen, then sends the rest. */
+  const midway = async (secret: string, id: string, meanwhile: () => Promise<unknown>) => {
+    const body = new PassThrough();
+    t.after(() => body.destroy());
+    const text = JSON.stringify(batch(id));
+    body.write(text.slice(0, text.length / 2));
+    const answer = app.inject({method: 'POST', url: '/v1/ingest', payload: body, headers: {'content-type': 'application/json', authorization: `Bearer ${secret}`}});
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await meanwhile();
+    body.end(text.slice(text.length / 2));
+    const response = await answer;
+    return [response.statusCode, JSON.parse(response.body).error];
+  };
+
+  const device = await pair('laptop-0123456789ab');
+  assert.deepEqual(await midway(device, 'laptop-0123456789ab', removeDevice), [403, 'device_revoked']);
+  const token = (await call('POST', '/api/tokens', {as: 'alice', body: {}})).body;
+  assert.deepEqual(await midway(token.secret, 'build-0123456789ab', () => call('DELETE', `/api/tokens/${token.id}`, {as: 'alice'})), [403, 'device_revoked']);
+  assert.deepEqual((await call('GET', '/api/devices', {as: 'alice'})).body, [], 'no device comes back or joins');
+  assert.deepEqual((await call('GET', '/api/overview', {as: 'alice'})).body.sources, [], 'nothing was kept');
+
+  // A secret a device was disconnected for never works again, even when it comes back meanwhile.
+  const old = await pair('desk-0123456789abcd');
+  assert.deepEqual(await midway(old, 'desk-0123456789abcd', () => removeDevice().then(() => pair('desk-0123456789abcd'))), [401, 'unauthorized'], 'connected with a new code');
+  const again = await pair('desk-0123456789abcd');
+  const joining = (await call('POST', '/api/tokens', {as: 'alice', body: {}})).body.secret;
+  const join = async () => {
+    await removeDevice();
+    const joined = await call('POST', '/v1/checkin', {body: {version: 1, agent: 'quotum/0.2.0', machine: machine('desk-0123456789abcd')}, headers: {authorization: `Bearer ${joining}`}});
+    assert.equal(joined.status, 200);
+  };
+  assert.deepEqual(await midway(again, 'desk-0123456789abcd', join), [401, 'unauthorized'], 'joined with a machine token');
+  assert.deepEqual((await call('GET', '/api/overview', {as: 'alice'})).body.sources, [], 'nothing was kept');
+});
+
+test('a request is given 30 seconds to arrive, and one that takes longer is answered in the spec’s terms', async () => {
+  const {app} = await hub();
+  // Node keeps the checking interval on the server, but its types do not declare it.
+  const server = app.server as typeof app.server & {connectionsCheckingInterval: number};
+  assert.equal(server.requestTimeout, 30_000);
+  // Once the headers are in, Node holds a request to the longer of the two limits.
+  assert.ok(server.headersTimeout <= server.requestTimeout, `headersTimeout ${server.headersTimeout}`);
+  assert.equal(server.connectionsCheckingInterval, 5_000);
+
+  const answered = (code: string, answering = false) => {
+    let written = '';
+    const socket = Object.assign(new PassThrough(), {writable: true, _httpMessage: answering ? {headersSent: true} : null});
+    socket.write = (chunk: string) => ((written += chunk), true);
+    // The hub closes it with the error, as Node does.
+    socket.on('error', () => {});
+    server.emit('clientError', Object.assign(new Error(code), {code}), socket);
+    return {written, destroyed: socket.destroyed};
+  };
+  const late = answered('ERR_HTTP_REQUEST_TIMEOUT');
+  assert.ok(late.destroyed, 'the connection is closed');
+  const [head, body] = late.written.split('\r\n\r\n');
+  assert.match(head, /^HTTP\/1\.1 408 Request Timeout\r\n/);
+  assert.match(head, /\r\nContent-Type: application\/json\r\n/);
+  assert.match(head, new RegExp(`\r\nContent-Length: ${body.length}\r\n`));
+  assert.match(head, /\r\nConnection: close$/);
+  assert.deepEqual(JSON.parse(body), {error: 'request_timeout'});
+  assert.deepEqual(JSON.parse(answered('HPE_HEADER_OVERFLOW').written.split('\r\n\r\n')[1]), {error: 'headers_too_large'});
+  assert.deepEqual(JSON.parse(answered('HPE_INVALID_METHOD').written.split('\r\n\r\n')[1]), {error: 'invalid_request'});
+  assert.equal(answered('ECONNRESET').written, '', 'a reset connection has no one to answer');
+  const midway = answered('HPE_INVALID_METHOD', true);
+  assert.deepEqual([midway.written, midway.destroyed], ['', true], 'an answer on its way is cut short, not spliced with another');
 });
 
 test('history reads a period selected on the chart, up to a month, on a grid fine enough for it', async () => {

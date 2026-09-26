@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {app, asksToTakeOver, failedTitle, intervalChoices, onboardingText, settingsSections, takeOverText, takeOverTitle, type AgentState} from '../lib/app';
+import {app, asksToTakeOver, failedTitle, intervalChoices, intervalMenu, onboardingText, settingsSections, takeOverText, takeOverTitle, type AgentState} from '../lib/app';
 
 test('mutations invoke and acknowledge in action order across all app controls', async t => {
   const events: string[] = [];
@@ -59,6 +59,26 @@ test('a provider is measured every 1 to 60 minutes; a value set by hand in the f
   assert.deepEqual(intervalChoices(120), [1, 2, 5, 10, 15, 30, 60]);
   assert.deepEqual(intervalChoices(180), [1, 2, 3, 5, 10, 15, 30, 60]);
   assert.deepEqual(intervalChoices(7200), [1, 2, 5, 10, 15, 30, 60, 120]);
+  assert.deepEqual(intervalChoices(null), [1, 2, 5, 10, 15, 30, 60]);
+});
+
+test('how often a provider is measured: as the hub needs, as for all clients, or at most so often', () => {
+  const none = {intervalS: null, intervalFrom: null, inheritedS: null, inheritedFrom: null} as const;
+  // Nothing set: the hub measures as often as needed.
+  const auto = intervalMenu(none);
+  assert.deepEqual([auto.first, auto.firstAvailable, auto.selected, auto.hint?.key], ['auto', true, 'first', 'measure.autoHint']);
+  // Its own, and none for all: Auto takes it out.
+  const own = intervalMenu({...none, intervalS: 300, intervalFrom: 'provider'});
+  assert.deepEqual([own.first, own.firstAvailable, own.selected], ['auto', true, 5]);
+  // Its own, and one for all: taking it out leaves the one for all.
+  const both = intervalMenu({intervalS: 300, intervalFrom: 'provider', inheritedS: 600, inheritedFrom: 'file'});
+  assert.deepEqual([both.first, both.firstAvailable, both.selected, both.hint], ['inherited', true, 5, null]);
+  // Only the one for all: the app does not change it, and says where it is set.
+  const file = intervalMenu({intervalS: 600, intervalFrom: 'file', inheritedS: 600, inheritedFrom: 'file'});
+  assert.deepEqual([file.firstAvailable, file.selected, file.hint], [false, 10, {key: 'measure.setInFile', vars: {file: 'config.toml'}}]);
+  const env = intervalMenu({intervalS: 180, intervalFrom: 'env', inheritedS: 180, inheritedFrom: 'env'});
+  assert.deepEqual([env.firstAvailable, env.selected, env.hint], [false, 3, {key: 'measure.setByEnv', vars: {key: 'QUOTUM_INTERVAL'}}]);
+  assert.ok(env.choices.includes(3), 'a value set by hand is among the choices');
 });
 
 test('the question about taking over names who measures, where it delivers and what becomes of it', () => {

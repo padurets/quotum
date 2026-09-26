@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use quotum_core::config::{Config, Hub, Paths, home, machine};
+use quotum_core::config::{Config, Hub, IntervalSource, Paths, home, machine};
 use quotum_core::holder::{Holder, LockError, RunLock, Running};
 use quotum_core::model::{Millis, Outcome, Provider, now_ms};
 use quotum_core::providers::{adapter, find_client};
@@ -587,13 +587,20 @@ fn accept_settings(paths: &Paths, state: &Mutex<Agent>, writes: &Mutex<()>, patc
     Ok(agent.saves)
 }
 
-/// The board's view of the agent (`app_state`).
+/// The board's view of the agent (`app_state`). The intervals are always there, `null`
+/// when not set: with a hub, no interval of a provider means the hub measures it as often
+/// as needed, and the board offers that choice.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provided {
     pub id: &'static str,
     pub enabled: bool,
-    pub interval_s: u64,
+    /// The most often it is measured, and where that is set.
+    pub interval_s: Option<u64>,
+    pub interval_from: Option<&'static str>,
+    /// The interval set for all providers, and where.
+    pub inherited_s: Option<u64>,
+    pub inherited_from: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,7 +617,10 @@ pub fn snapshot(shell: &Arc<Shell>) -> (State, Vec<Provided>, bool) {
         .map(|p| Provided {
             id: p.id(),
             enabled: agent.config.enabled(p),
-            interval_s: agent.config.interval_ms(p) / 1000,
+            interval_s: agent.config.min_interval_ms(p).map(|ms| ms / 1000),
+            interval_from: agent.config.interval_source(p).map(source_id),
+            inherited_s: agent.config.global_interval().map(|(ms, _)| ms / 1000),
+            inherited_from: agent.config.global_interval().map(|(_, source)| source_id(source)),
             account: agent.config.account_name(p).map(str::to_string),
             client: agent.clients.get(&p).cloned().flatten().map(|c| c.display().to_string()),
             last: last.get(&p).cloned(),
@@ -619,9 +629,41 @@ pub fn snapshot(shell: &Arc<Shell>) -> (State, Vec<Provided>, bool) {
     (agent.state.clone(), providers, agent.config.sessions())
 }
 
+/// Where an interval is set, as the board names it.
+fn source_id(source: IntervalSource) -> &'static str {
+    match source {
+        IntervalSource::Provider => "provider",
+        IntervalSource::File => "file",
+        IntervalSource::Env => "env",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intervals_not_set_go_to_the_board_as_null() {
+        let provided = Provided {
+            id: "codex",
+            enabled: true,
+            interval_s: None,
+            interval_from: None,
+            inherited_s: None,
+            inherited_from: None,
+            account: None,
+            client: None,
+            last: None,
+        };
+        let json = serde_json::to_value(&provided).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"id": "codex", "enabled": true, "intervalS": null, "intervalFrom": null, "inheritedS": null, "inheritedFrom": null})
+        );
+        let set =
+            Provided { interval_s: Some(300), interval_from: Some(source_id(IntervalSource::Provider)), ..provided };
+        assert_eq!(serde_json::to_value(&set).unwrap()["intervalFrom"], "provider");
+    }
 
     #[test]
     fn a_slow_stopped_worker_keeps_ownership_until_it_finishes() {

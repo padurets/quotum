@@ -128,6 +128,10 @@ and never several at once:
 
 - **One at a time.** Measurements run strictly one after another, so at any moment at
   most one client is running.
+- **With a hub, the hub sets the pace** (see *One measurer per subscription*): the
+  device on duty measures when the hub tells it to. An interval set for a provider is
+  then the most often it is measured; eco mode and the rest of this list hold only
+  while the hub does not answer, or without a hub.
 - **An interval per provider**, configurable, at least 60 s (below that Claude Code
   answers from its cache anyway), 120 s by default.
 - **Spread.** After the first round (all providers right away, one after another) each
@@ -169,15 +173,42 @@ subscription:
 - A holder that goes quiet (asleep, switched off) loses duty when its last measurement
   goes stale, and the next device to ask takes over.
 
-Duty is kept in memory; after a restart of the hub the first devices to check in take
-it again. An agent that cannot ask simply measures.
+Duty decides who measures; the hub's **pace** (`hub/server/cadence.ts`) decides when,
+from what it sees of the subscription everywhere, which no single machine does:
+
+- The device on duty asks every 15 seconds, one request for all its subscriptions,
+  without starting a client, and measures only when told. The answer gives times as
+  durations, so a machine's clock being off does not matter, and with each `measure`
+  a promise: the next measurement comes within `nextInMs` of this one, which is how
+  long the measurement says it stays representative.
+- A subscription with little left (any window at 10% or less, above 0) is measured
+  every minute while it was active within the last hour (its numbers changed or it was
+  in use), every 2 minutes after an hour of quiet, every 5 after three. One in use (a
+  coding agent working on it on any machine, or its client used on the device on duty)
+  or whose numbers just changed, every 2 minutes. Otherwise the interval doubles, up
+  to 15 minutes, a cap the hub never passes; a known reset pulls the next measurement
+  to 30 seconds after it. A device's own interval is the least it is asked for.
+- The hub waits out a device's failed measurements, longer each time in a row (15
+  minutes for a signed-out client), and a device doing so does not take duty; a healthy
+  one does, as before. A `measure` nothing came back for (a lost answer) is asked again
+  after 90 seconds, then less and less often.
+- The lease is as before: only a delivery extends it, and it lasts past the next
+  planned measurement, so a holder waiting for its pace keeps duty.
+
+Duty and the pace are kept in memory; after a restart of the hub the first devices to
+check in take duty again and measure at once. An agent that cannot ask keeps asking
+every 15 seconds while it waits for a measurement the hub promised, and measures on its
+own schedule (eco mode) once the hub has been silent for four minutes and that
+measurement is due. An agent's log says when another device measures; waiting for the
+hub's pace is not logged.
 
 ## Delivery
 
 The agent posts each measurement right away. When the hub is unreachable, measurements
 wait in a spool file (at most 5,000, about two days, rewritten atomically) and go out
 oldest first when it answers again; meanwhile the agent tries again after a minute,
-then less and less often, up to once an hour, and measures without checking in. Resending
+then less and less often, up to once an hour. A check-in the hub answers ends that wait
+at once, and what was kept goes right after it. Resending
 is safe: a measurement the hub already has counts as a duplicate. When the hub says
 the device was removed or its token revoked, the agent stops; any other refusal only
 makes it wait. A sign-in page in front of the hub (a redirect, or a web page where the
@@ -341,7 +372,9 @@ Secrets (sessions, tokens, codes, invites) are random, prefixed by kind (`qt_s_`
 `qt_m_`, `qt_d_`, `qt_c_`, `qt_i_`) and stored only as SHA-256 hashes; passwords as
 scrypt hashes. Changes made with a session cookie are accepted only from the hub's own
 pages (Origin check, SameSite cookie). Failed sign-ins and sign-ups and code lookups are
-rate-limited.
+rate-limited. An agent's request with an unknown or revoked token is refused before its
+body is read, so whoever reaches the hub cannot make it hold bodies it would throw away,
+and a request has 30 seconds to arrive in full.
 
 ## The dashboard
 
@@ -353,6 +386,9 @@ the page, which ticks every 15 seconds, and every minute for the chart and the t
 only that is rendered again, the board itself reads no clock. Nothing on the page is
 fixed and the widgets are not frosted, so a scroll paints only what comes into view,
 even in a WebKitGTK window that draws without the GPU.
+A card's dot by the logo tells how its measurements go: its colour, and in its tooltip
+when it was measured and, while the hub sets the pace, when the next measurement comes
+and why, each a line of its own.
 A board has two areas: the cards (and the list of running agents, when turned on),
 which are about now and show every window, and under
 them the analytics, the chart and the table, which show one window type over one period
