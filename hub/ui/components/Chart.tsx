@@ -32,16 +32,26 @@ const defaultSegmenter = () =>
 
 /**
  * The characters of a text as a reader counts them: a flag, an emoji with its skin tone or
- * a letter with its accent is one. Without a segmenter, code points: an emoji is still whole.
+ * a letter with its accent is one. Without a segmenter the common clusters are held
+ * together by hand: a pair of regional indicators, and a character with the marks,
+ * variation selector, skin tones and joined characters after it.
  */
 export function graphemes(text: string, by: Intl.Segmenter | null = defaultSegmenter()) {
-  return by ? Array.from(by.segment(text), part => part.segment) : Array.from(text);
+  return by ? Array.from(by.segment(text), part => part.segment) : (text.match(CLUSTER) ?? []);
 }
+const CLUSTER = /\p{Regional_Indicator}{2}|[\s\S](?:[\p{M}\u{FE0F}\u{1F3FB}-\u{1F3FF}]|\u200d[\s\S])*/gu;
+
+/**
+ * What never hangs before the ellipsis: spaces, and punctuation and maths signs that open,
+ * join or separate. Closing marks stay with what they close, and symbols with the name, as
+ * an emoji is one.
+ */
+const HANGING = /[\s\p{Z}\p{Ps}\p{Pi}\p{Pd}\p{Pc}\p{Po}\p{Sm}]+$/u;
 
 /** A name shortened to its first `keep` characters and an ellipsis, with no space, separator or opening mark hanging before it. */
 export function shortName(name: string, keep: number) {
   const letters = graphemes(name);
-  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(/[\s·,:;–—\-/|([{«„“‘"']+$/u, '')}…`;
+  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(HANGING, '')}…`;
 }
 
 /**
@@ -327,12 +337,11 @@ export function Chart({
     [lines, from, now, span, width, height, cellMs],
   );
 
-  const {rows, planned, foreseen} = hover === null ? {rows: [], planned: false, foreseen: false} : readCell(lines, plans, hover, cellMs, now, to, forecasts);
-  // Up to the cell holding now a line reads what it had left beside its plan and the gap;
-  // after it, its plan beside where it is going. No column stands empty on either side.
-  const later = hover !== null && hover > now;
-  const columns = {left: !later, plan: planned, gap: planned && !later, forecast: foreseen && later};
+  const none = {left: false, plan: false, gap: false, forecast: false};
+  const {rows, columns} = hover === null ? {rows: [], columns: none} : readCell(lines, plans, hover, cellMs, now, to, forecasts);
   const columnCount = Object.values(columns).filter(Boolean).length;
+  // A cell ahead of now where no line reads anything says only what happens in it.
+  const grid = rows.length > 0 && columnCount > 0;
   const markerReadout = hover === null ? [] : markers.filter(m => m.at >= hover && m.at < hover + cellMs);
   // Past the right edge: an announcement, then where windows run out, each said there,
   // how soon by the page's clock as the table says it, a series' name shortened to the plot.
@@ -703,7 +712,7 @@ export function Chart({
         (rows.some(row => row.left !== null || row.plan !== null || row.forecast !== null) || markerReadout.length > 0) && (
           <Tooltip tip={tip} className={narrow ? 'is-below' : ''} style={narrow ? {top: height * scale - lift} : {left: tipLeft, maxWidth: tipRoom}}>
             <div className="tooltip-time">{cellLabel(hover, cellMs)}</div>
-            {rows.length > 0 && (
+            {grid && (
               <div className="tooltip-grid" style={{gridTemplateColumns: `14px minmax(0, 1fr) repeat(${columnCount}, auto)`}}>
                 <span />
                 <span />
@@ -725,7 +734,7 @@ export function Chart({
                 ))}
               </div>
             )}
-            {rows.length > 0 && markerReadout.length > 0 && <div className="tooltip-sep" />}
+            {grid && markerReadout.length > 0 && <div className="tooltip-sep" />}
             {markerReadout.map(marker => (
               <div className={`tooltip-mark ${marker.strong ? 'is-strong' : ''}`} key={marker.key}>
                 <svg width="14" height="10" aria-hidden="true">

@@ -59,9 +59,8 @@ test('ahead of now a line reads where its pace leads, beside its plan, until it 
   const lines = [line('weekly', [[now - 5 * minute, 40, 0]]), line('other', [[now - 5 * minute, 70, 0]])];
   const forecast: ForecastLine = {key: 'weekly', name: 'Weekly', color: '', dash: '', points: [[now, 40], [now + 40 * minute, 0]], at: now + 40 * minute};
   const ahead = now + 10 * minute;
-  const {rows, foreseen, planned} = readout(lines, [plan(['weekly'], 50)].map(p => ({...p, runs: [[[now - 60 * minute, 50], [now + 60 * minute, 50]]]})), ahead, cellMs, now, now + 60 * minute, [forecast]);
-  assert.equal(foreseen, true);
-  assert.equal(planned, true);
+  const {rows, columns} = readout(lines, [plan(['weekly'], 50)].map(p => ({...p, runs: [[[now - 60 * minute, 50], [now + 60 * minute, 50]]]})), ahead, cellMs, now, now + 60 * minute, [forecast]);
+  assert.deepEqual(columns, {left: false, plan: true, gap: false, forecast: true});
   // Read at the cell's middle, 12.5 minutes on: 40 less a quarter of it and a bit.
   assert.deepEqual(rows.map(row => [row.left, row.plan, row.gap, row.forecast]), [
     [null, 50, null, 28],
@@ -69,5 +68,16 @@ test('ahead of now a line reads where its pace leads, beside its plan, until it 
   ]);
   assert.equal(readout(lines, [], now + 45 * minute, cellMs, now, now + 60 * minute, [forecast]).rows[0].forecast, null, 'past where it runs out');
   assert.equal(readout(lines, [], now - 2 * minute, cellMs, now, now + 60 * minute, [forecast]).rows[0].forecast, null, 'not in the cell holding now');
-  assert.equal(readout(lines, [], ahead, cellMs, now, now + 60 * minute).foreseen, false, 'no column without a forecast drawn');
+});
+
+test('columns stay put up to now, and ahead of it are the values the cell reads', () => {
+  const lines = [line('weekly', [[now - 5 * minute, 40, 0]])];
+  const forecast: ForecastLine = {key: 'weekly', name: 'Weekly', color: '', dash: '', points: [[now, 40], [now + 40 * minute, 0]], at: now + 40 * minute};
+  const planned = [{...plan(['weekly'], 50), runs: [[[now - 60 * minute, 50], [now + 20 * minute, 50]]] as PlanLine['runs']}];
+  const at = (cell: number, plans: PlanLine[], forecasts: ForecastLine[]) => readout(lines, plans, cell, cellMs, now, now + 60 * minute, forecasts).columns;
+  assert.deepEqual(at(cell, planned, [forecast]), {left: true, plan: true, gap: true, forecast: false}, 'before now');
+  assert.deepEqual(at(cell, [], [forecast]), {left: true, plan: false, gap: false, forecast: false}, 'before now, no plan drawn');
+  assert.deepEqual(at(now + 30 * minute, planned, [forecast]), {left: false, plan: false, gap: false, forecast: true}, 'past the plan’s end');
+  assert.deepEqual(at(now + 45 * minute, planned, [forecast]), {left: false, plan: false, gap: false, forecast: false}, 'past the plan and where it runs out');
+  assert.deepEqual(at(now + 10 * minute, [], []), {left: false, plan: false, gap: false, forecast: false}, 'nothing drawn ahead');
 });
