@@ -60,9 +60,14 @@ test('a label at the chart\'s edge keeps as much of a name as fits, an emoji who
   assert.equal(shortName('Claude', 6), 'Claude');
   assert.equal(shortName('Ahead of the plan', 6), 'Ahead…', 'no space before the ellipsis');
   assert.equal(shortName('Antigravity 2 · Gemini', 15), 'Antigravity 2…', 'nor a separator');
+  assert.equal(shortName('CI runners (eco)', 12), 'CI runners…', 'nor an opening bracket');
+  assert.equal(shortName('Codex / Fable', 7), 'Codex…', 'nor a slash');
+  assert.equal(shortName('Codex «work» team', 7), 'Codex…', 'nor an opening quote');
   assert.equal(shortName('Claude', 0), '…');
   // A flag, an emoji with a skin tone or joined of several, a letter with its accent: each one character, never cut apart.
-  assert.deepEqual(graphemes('Team 🇷🇺👍🏽👩‍💻é'), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '👍🏽', '👩‍💻', 'é']);
+  assert.deepEqual(graphemes('Team 🇷🇺👍🏽👩‍💻e\u0301'), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '👍🏽', '👩‍💻', 'e\u0301']);
+  // A browser without a segmenter counts code points: an emoji is still never cut in half.
+  assert.deepEqual(graphemes('🚀e\u0301', null), ['🚀', 'e', '\u0301']);
   assert.equal(shortName('Team 🚀🚀🚀🚀', 6), 'Team 🚀…');
   assert.equal(shortName('Team 🇷🇺🇷🇺🇷🇺', 7), 'Team 🇷🇺🇷🇺…');
   assert.equal(shortName('Team 👩‍💻👩‍💻 ops', 6), 'Team 👩‍💻…');

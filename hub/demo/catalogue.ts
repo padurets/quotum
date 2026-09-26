@@ -385,7 +385,7 @@ const all: DemoSet = {
       ],
       look: [
         'The table of agents lists many rows, by activity',
-        'The chart\'s tooltip has a row for every line in the legend\'s order, with what is left, the plan and the gap in columns, and ahead of now where each forecast leads in a column of its own; on a phone it stays whole on the screen',
+        'The chart\'s tooltip has a row for every line in the legend\'s order, with what is left, the plan and the gap in columns up to now, and after it the plan and where each forecast leads; on a phone it stays whole on the screen',
         'The chart\'s settings switch the plan and the forecast on and off, under "On the chart"',
         'My machines → Projects: quotum once, on the laptop, though three agents work in three folders (the tray and the table show quotum three times, with hub and quotum.feat-18-desktop-app under two of them)',
         'Renamed or merged in My machines, a project is shown under its new name in the tray and the table too',
@@ -530,6 +530,7 @@ const all: DemoSet = {
       look: [
         'Its machine sleeps from the 2nd minute to the 14th, and so every 45 minutes: the card goes stale (its dot, no line under the limits) and comes back, its agents go and come back, a gap stays on the 24-hour chart',
         'Its Gemini week runs out past the chart\'s right edge: "Antigravity 2 · Gemini: runs out in 2d →" stands there, in its colour, stacked with the other labels and never over the Codex reset\'s; pointing at it tells the date and time',
+        'On a phone 320 px wide in Russian the label shortens the name to what fits, "Antigravity 2…", with nothing hanging before the ellipsis and the time whole',
       ],
     },
     {

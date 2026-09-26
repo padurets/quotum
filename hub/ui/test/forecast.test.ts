@@ -122,6 +122,8 @@ test('a window without a forecast says why', () => {
   const measured = start + 3 * DAY;
   // An idle rolling window: its reset is its length from the measurement.
   assert.equal(outlook(hours(100, {resetAt: measured + 5 * HOUR}), measured, measured, null).key, 'idle');
+  // Judged at the measurement, however long ago: an idle window measured seldom stays idle.
+  assert.equal(outlook(hours(100, {resetAt: measured + 5 * HOUR}), measured, measured + 10 * MIN, null).key, 'idle');
   // Used, but within the tolerance of `started`: it has only just started.
   assert.equal(outlook(hours(99, {resetAt: measured + 5 * HOUR - MIN}), measured, measured, null).key, 'needData');
   // Back early: a new reset a week on, nothing used yet.

@@ -25,15 +25,23 @@ const LABEL_BAND = 15;
 /** How far apart labels stacked at the right edge stand. */
 const LABEL_STEP = 22;
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+/** Made when first needed: a browser without it (Firefox before 125) still draws the board. */
+let segmenter: Intl.Segmenter | null | undefined;
+const defaultSegmenter = () =>
+  (segmenter ??= typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity: 'grapheme'}) : null);
 
-/** The characters of a text as a reader counts them: a flag, an emoji with its skin tone or a letter with its accent is one. */
-export const graphemes = (text: string) => Array.from(graphemeSegmenter.segment(text), part => part.segment);
+/**
+ * The characters of a text as a reader counts them: a flag, an emoji with its skin tone or
+ * a letter with its accent is one. Without a segmenter, code points: an emoji is still whole.
+ */
+export function graphemes(text: string, by: Intl.Segmenter | null = defaultSegmenter()) {
+  return by ? Array.from(by.segment(text), part => part.segment) : Array.from(text);
+}
 
-/** A name shortened to its first `keep` characters and an ellipsis, with no space or separator hanging before it. */
+/** A name shortened to its first `keep` characters and an ellipsis, with no space, separator or opening mark hanging before it. */
 export function shortName(name: string, keep: number) {
   const letters = graphemes(name);
-  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(/[\s·,:;–—-]+$/u, '')}…`;
+  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(/[\s·,:;–—\-/|([{«„“‘"']+$/u, '')}…`;
 }
 
 /**
@@ -97,21 +105,29 @@ function MarkerLabel({
   const keep = fit?.input === input ? fit.keep : null;
   const shown = shorten && keep !== null ? shorten.say(shortName(shorten.name, keep)) : children;
   // Measured once for each input, on a hidden copy of the whole text with an ellipsis after
-  // it: its width, each character of the name as drawn in it, and the ellipsis.
+  // it: its width, each character of the name as drawn in it, and the ellipsis. Where the
+  // copy does not hold the text character for character (the name not in it, spaces drawn
+  // as one), or the browser will not measure, the text shows whole: a label a little wide
+  // is better than a board that is not drawn.
   useLayoutEffect(() => {
     const element = whole.current;
     if (!shorten || !element) return;
-    const length = element.getSubStringLength(0, children.length);
     let found: number | null = null;
-    if (length > shorten.room) {
-      let at = children.indexOf(shorten.name);
-      const widths = graphemes(shorten.name).map(letter => {
-        const width = element.getSubStringLength(at, letter.length);
-        at += letter.length;
-        return width;
-      });
-      const name = widths.reduce((sum, width) => sum + width, 0);
-      found = fitting(widths, length - name, element.getSubStringLength(children.length, 1), shorten.room);
+    try {
+      const start = children.indexOf(shorten.name);
+      const length = element.getSubStringLength(0, children.length);
+      if (length > shorten.room && start >= 0 && element.getNumberOfChars() === children.length + 1) {
+        let at = start;
+        const widths = graphemes(shorten.name).map(letter => {
+          const width = element.getSubStringLength(at, letter.length);
+          at += letter.length;
+          return width;
+        });
+        const name = widths.reduce((sum, width) => sum + width, 0);
+        found = fitting(widths, length - name, element.getSubStringLength(children.length, 1), shorten.room);
+      }
+    } catch {
+      found = null;
     }
     setFit(fit => (fit?.input === input && fit.keep === found ? fit : {input, keep: found}));
   }, [input]);
@@ -312,6 +328,11 @@ export function Chart({
   );
 
   const {rows, planned, foreseen} = hover === null ? {rows: [], planned: false, foreseen: false} : readCell(lines, plans, hover, cellMs, now, to, forecasts);
+  // Up to the cell holding now a line reads what it had left beside its plan and the gap;
+  // after it, its plan beside where it is going. No column stands empty on either side.
+  const later = hover !== null && hover > now;
+  const columns = {left: !later, plan: planned, gap: planned && !later, forecast: foreseen && later};
+  const columnCount = Object.values(columns).filter(Boolean).length;
   const markerReadout = hover === null ? [] : markers.filter(m => m.at >= hover && m.at < hover + cellMs);
   // Past the right edge: an announcement, then where windows run out, each said there,
   // how soon by the page's clock as the table says it, a series' name shortened to the plot.
@@ -329,8 +350,10 @@ export function Chart({
       .map(m => ({key: m.key, label: m.label, time: stamp(m.at), text: t('chart.ahead', {label: m.label, time: countdown(m.at - pageNow)}), color: undefined, say: undefined})),
     ...forecasts.flatMap(f => {
       if (f.at === null || f.at <= to) return [];
-      const say = (name: string) => t('chart.runsOut', {label: name, time: countdown(f.at! - pageNow)});
-      return [{key: `forecast-${f.key}`, label: f.name, time: t('forecast.runsOutAt', {time: stamp(f.at)}), text: say(f.name), color: f.color, say}];
+      // Spaces drawn as one: a name typed with two in a row reads, and measures, as SVG draws it.
+      const name = f.name.replace(/\s+/g, ' ');
+      const say = (label: string) => t('chart.runsOut', {label, time: countdown(f.at! - pageNow)});
+      return [{key: `forecast-${f.key}`, label: name, time: t('forecast.runsOutAt', {time: stamp(f.at)}), text: say(name), color: f.color, say}];
     }),
   ];
   /** A label past the right edge pointed at or tapped: the tooltip tells its time instead of the cell's values. */
@@ -681,31 +704,23 @@ export function Chart({
           <Tooltip tip={tip} className={narrow ? 'is-below' : ''} style={narrow ? {top: height * scale - lift} : {left: tipLeft, maxWidth: tipRoom}}>
             <div className="tooltip-time">{cellLabel(hover, cellMs)}</div>
             {rows.length > 0 && (
-              <div className={`tooltip-grid ${planned ? 'is-planned' : ''} ${foreseen ? 'is-forecast' : ''}`}>
+              <div className="tooltip-grid" style={{gridTemplateColumns: `14px minmax(0, 1fr) repeat(${columnCount}, auto)`}}>
                 <span />
                 <span />
-                <span className="tooltip-head">{t('chart.left')}</span>
-                {planned && (
-                  <>
-                    <span className="tooltip-head">{t('chart.plan')}</span>
-                    <span className="tooltip-head">{t('chart.gap')}</span>
-                  </>
-                )}
-                {foreseen && <span className="tooltip-head">{t('chart.forecast')}</span>}
+                {columns.left && <span className="tooltip-head">{t('chart.left')}</span>}
+                {columns.plan && <span className="tooltip-head">{t('chart.plan')}</span>}
+                {columns.gap && <span className="tooltip-head">{t('chart.gap')}</span>}
+                {columns.forecast && <span className="tooltip-head">{t('chart.forecast')}</span>}
                 {rows.map(row => (
                   <div className="tooltip-row" key={row.line.key}>
                     <svg width="14" height="4" aria-hidden="true">
                       <line x1="0" x2="14" y1="2" y2="2" stroke={row.line.color} strokeWidth="2" strokeDasharray={row.line.dash || undefined} />
                     </svg>
                     <span className="tooltip-name">{row.line.name}</span>
-                    <strong>{row.left !== null && `${num(row.left)}%`}</strong>
-                    {planned && (
-                      <>
-                        <span className="tooltip-plan">{row.plan !== null && `${num(row.plan)}%`}</span>
-                        <span className={`tooltip-gap ${row.gap !== null ? gapTone(row.gap) : ''}`}>{row.gap !== null && gapText(row.gap)}</span>
-                      </>
-                    )}
-                    {foreseen && <span className="tooltip-forecast">{row.forecast !== null && `${num(row.forecast)}%`}</span>}
+                    {columns.left && <strong>{row.left !== null && `${num(row.left)}%`}</strong>}
+                    {columns.plan && <span className="tooltip-plan">{row.plan !== null && `${num(row.plan)}%`}</span>}
+                    {columns.gap && <span className={`tooltip-gap ${row.gap !== null ? gapTone(row.gap) : ''}`}>{row.gap !== null && gapText(row.gap)}</span>}
+                    {columns.forecast && <span className="tooltip-forecast">{row.forecast !== null && `${num(row.forecast)}%`}</span>}
                   </div>
                 ))}
               </div>

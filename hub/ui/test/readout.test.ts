@@ -68,6 +68,6 @@ test('ahead of now a line reads where its pace leads, beside its plan, until it 
     [null, null, null, null],
   ]);
   assert.equal(readout(lines, [], now + 45 * minute, cellMs, now, now + 60 * minute, [forecast]).rows[0].forecast, null, 'past where it runs out');
-  assert.equal(readout(lines, [], now - 5 * minute, cellMs, now, now + 60 * minute, [forecast]).rows[0].forecast, null, 'not in the cell holding now');
+  assert.equal(readout(lines, [], now - 2 * minute, cellMs, now, now + 60 * minute, [forecast]).rows[0].forecast, null, 'not in the cell holding now');
   assert.equal(readout(lines, [], ahead, cellMs, now, now + 60 * minute).foreseen, false, 'no column without a forecast drawn');
 });
