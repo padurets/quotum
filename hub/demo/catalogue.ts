@@ -737,7 +737,7 @@ const all: DemoSet = {
       windows: [fiveHours(0, 5), weekly({since: -3 * DAY, use: through([0, 0], [2.75, 97])})],
       on: {ana: {name: 'Too slow to answer'}},
       expect: [{title: 'Too slow to answer'}, {error: 'timeout'}, {stale: true}, {forecast: 'weekly', outlook: 'pastZero'}],
-      look: ['No forecast for its week: the tooltip says it should have run out hours ago, and waits for a new measurement'],
+      look: ['No forecast for its week: the tooltip says around when, hours ago, it should have run out, and waits for a new measurement'],
     },
     {
       kind: 'card',

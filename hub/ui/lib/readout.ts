@@ -40,11 +40,11 @@ export type Columns = {left: boolean; plan: boolean; gap: boolean; forecast: boo
  * the legend's order, whether or not it has a value there, so the rows stay put as the
  * pointer moves. A plan is read beside the lines it plans. Up to the cell holding now the
  * columns are what is left, and the plan with the gap when the chart draws a plan
- * somewhere in the period (`planned`), so they stay put too. In a cell wholly ahead of now
+ * somewhere in the period, so they stay put too. In a cell wholly ahead of now
  * a line has no value of its own: its plan, and where its pace leads until its window
  * runs out, each a column only where the cell reads one.
  */
-export function readout(lines: Line[], plans: PlanLine[], cell: number, cellMs: number, now: number, to: number, forecasts: ForecastLine[] = []): {rows: ReadoutRow[]; planned: boolean; columns: Columns} {
+export function readout(lines: Line[], plans: PlanLine[], cell: number, cellMs: number, now: number, to: number, forecasts: ForecastLine[] = []): {rows: ReadoutRow[]; columns: Columns} {
   const at = Math.min(to, cell + cellMs / 2);
   const rows = lines.map(line => {
     const value = valueIn(line.points, cell, now, Math.max(cellMs, line.staleAfterMs)) ?? null;
@@ -62,7 +62,7 @@ export function readout(lines: Line[], plans: PlanLine[], cell: number, cellMs: 
     cell > now
       ? {left: false, plan: rows.some(row => row.plan !== null), gap: false, forecast: rows.some(row => row.forecast !== null)}
       : {left: true, plan: planned, gap: planned, forecast: false};
-  return {rows, planned, columns};
+  return {rows, columns};
 }
 
 /** A gap as it reads: "+7", "−8" with a true minus, "0". */

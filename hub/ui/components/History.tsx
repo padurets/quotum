@@ -100,7 +100,7 @@ export const History = memo(function History({
   const measuredTo = answered ? Math.max(frame.to, selected ? Math.min(answered.to, selected.to) : answered.to) : frame.to;
   // An announced Codex reset matters only where Codex is on the chart.
   const announced = frame.live && visible.some(line => line.provider === 'codex') ? (resets.codex?.scheduled?.scheduledFor ?? null) : null;
-  // The spending plan applies to weekly windows; the days ahead are there for it, when a line on the chart has a plan.
+  // The spending plan applies to weekly windows, when a line on the chart has a plan.
   const planAvailable = prefs.kind === 'weekly' && visible.some(line => planOf(view, line.sourceId) !== null);
   const planShown = planAvailable && prefs.showPlan;
   // Where each window's pace leads, for the lines that have a forecast to draw.

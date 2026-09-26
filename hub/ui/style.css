@@ -477,7 +477,6 @@ td.muted, small.muted { color: var(--text-3); }
 /* A time range is dragged across the chart; vertical swipes still scroll the page. */
 .chart svg.is-selectable { cursor: crosshair; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
 .selection { fill: color-mix(in oklab, var(--accent) 14%, transparent); stroke: color-mix(in oklab, var(--accent) 50%, transparent); stroke-width: 1; }
-/* Over the widgets below a tall one reaches into, and like the dot's tip under the sticky bars. */
 .tooltip {
   position: absolute; top: 8px; z-index: 4; pointer-events: none; width: max-content; min-width: 190px; max-width: min(360px, 100%);
   border-radius: 10px; padding: 9px 11px; font-size: 12px;
@@ -491,8 +490,8 @@ td.muted, small.muted { color: var(--text-3); }
 .tooltip.is-edge { top: auto; min-width: 0; }
 .tooltip-time { color: var(--text-3); margin-bottom: 5px; font-family: var(--mono); font-size: 11px; }
 .tooltip.is-edge .tooltip-time { margin: 2px 0 0; }
-/* One row a line: its swatch, its name, then what the cell reads of it (left, plan and gap, or plan and forecast), each a column across all rows; the chart sets how many. */
-.tooltip-grid { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; column-gap: 9px; row-gap: 3px; }
+/* One row a line: its swatch, its name, then what the cell reads of it (left, plan and gap, or plan and forecast), each a column across all rows; the chart sets the columns. */
+.tooltip-grid { display: grid; align-items: center; column-gap: 9px; row-gap: 3px; }
 .tooltip-row { display: contents; }
 .tooltip-head { font-size: 10.5px; color: var(--text-4); text-align: right; }
 .tooltip-name { color: var(--text-2); overflow-wrap: anywhere; line-height: 1.3; }
@@ -508,7 +507,7 @@ td.muted, small.muted { color: var(--text-3); }
 .tooltip-mark strong { min-width: 36px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .tooltip-mark span { flex: 1 1 0; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
 .tooltip-mark.is-strong span, .tooltip-marker.is-strong { color: var(--accent); }
-.tooltip-marker { font-weight: 500; }
+.tooltip-marker { font-weight: 500; overflow-wrap: anywhere; }
 .tooltip-detail { flex-basis: 100%; padding-left: 23px; font-size: 11px; color: var(--text-3); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
 /* Positioned, so what is hidden for screen readers in a cell scrolls with the table rather than widening the page. */

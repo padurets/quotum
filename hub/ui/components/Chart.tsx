@@ -33,20 +33,20 @@ const defaultSegmenter = () =>
 /**
  * The characters of a text as a reader counts them: a flag, an emoji with its skin tone or
  * a letter with its accent is one. Without a segmenter the common clusters are held
- * together by hand: a pair of regional indicators, and a character with the marks,
- * variation selector, skin tones and joined characters after it.
+ * together by hand: a pair of regional indicators, and a character with the marks
+ * (a variation selector among them), skin tones, tags and joined characters after it.
  */
 export function graphemes(text: string, by: Intl.Segmenter | null = defaultSegmenter()) {
   return by ? Array.from(by.segment(text), part => part.segment) : (text.match(CLUSTER) ?? []);
 }
-const CLUSTER = /\p{Regional_Indicator}{2}|[\s\S](?:[\p{M}\u{FE0F}\u{1F3FB}-\u{1F3FF}]|\u200d[\s\S])*/gu;
+const CLUSTER = /\p{Regional_Indicator}{2}|[\s\S](?:[\p{M}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]|\u200d[\s\S])*/gu;
 
 /**
- * What never hangs before the ellipsis: spaces, and punctuation and maths signs that open,
- * join or separate. Closing marks stay with what they close, and symbols with the name, as
- * an emoji is one.
+ * What never hangs before the ellipsis: spaces, and marks that open, join or separate,
+ * including a straight quote after a space. What ends a word stays with it: a closing
+ * mark, a percent, a times sign, an emoji.
  */
-const HANGING = /[\s\p{Z}\p{Ps}\p{Pi}\p{Pd}\p{Pc}\p{Po}\p{Sm}]+$/u;
+const HANGING = /(?:[\s\p{Z}\p{Ps}\p{Pi}\p{Pd}\p{Pc},.:;·•/\\|&‚、。\u2212~]|(?<=\s)["'])+$/u;
 
 /** A name shortened to its first `keep` characters and an ellipsis, with no space, separator or opening mark hanging before it. */
 export function shortName(name: string, keep: number) {

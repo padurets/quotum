@@ -296,9 +296,9 @@ them), kept for 90 days.
   A week with a plan is judged against the end of the plan while it runs, other windows
   against their reset: within 5 points either way of spending it all then it is on
   pace, 5 or more over it runs out, otherwise some is left. A window says nothing until
-  it has run half an hour or a twentieth of its length (8.4 hours of a week), nor an
-  idle rolling window; one due to have run out already says when and waits for a new
-  measurement. Numbers gone stale keep their forecast: the moment it runs out is a
+  it has run half an hour or a twentieth of its length, whichever is longer (8.4 hours
+  of a week), nor an idle rolling window; one due to have run out already says when and
+  waits for a new measurement. Numbers gone stale keep their forecast: the moment it runs out is a
   moment, as true for an old measurement until it comes. The forecast assumes that after
   an early reset a provider reports a new reset time, so the window starts over; one
   that kept the old reset time would read as spending slower until then. A plan with days at 0

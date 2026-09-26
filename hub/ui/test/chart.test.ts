@@ -70,11 +70,20 @@ test('a label at the chart\'s edge keeps as much of a name as fits, an emoji who
   assert.equal(shortName('Codex\u2010work', 6), 'Codex…', 'nor a hyphen');
   assert.equal(shortName('Codex \u2212 2', 7), 'Codex…', 'nor a minus');
   assert.equal(shortName('Codex (eco) team', 11), 'Codex (eco)…', 'a closing bracket stays with what it closes');
+  assert.equal(shortName('Codex "eco" team', 11), 'Codex "eco"…', 'and a closing quote');
+  assert.equal(shortName('Codex "eco" team', 7), 'Codex…', 'an opening one does not');
+  assert.equal(shortName('Codex «eco» team', 11), 'Codex «eco»…');
+  assert.equal(shortName('Team 100% ops', 9), 'Team 100%…', 'what ends a word stays');
+  assert.equal(shortName('Max 5× work', 6), 'Max 5×…');
+  assert.equal(shortName('C++ team', 3), 'C++…');
+  assert.equal(shortName('ops_team', 4), 'ops…', 'nor an underscore');
   assert.equal(shortName('Claude', 0), '…');
   // A flag, an emoji with a skin tone or joined of several, a letter with its accent: each one character, never cut apart.
   assert.deepEqual(graphemes('Team 🇷🇺👍🏽👩‍💻e\u0301'), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '👍🏽', '👩‍💻', 'e\u0301']);
   // A browser without a segmenter holds the common clusters together by hand.
-  assert.deepEqual(graphemes('Team 🇷🇺👍🏽👩‍💻❤️e\u0301', null), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '👍🏽', '👩‍💻', '❤️', 'e\u0301']);
+  assert.deepEqual(graphemes('Team 🇷🇺🇺🇦👍🏽👨‍👩‍👧1️⃣❤️e\u0301', null), ['T', 'e', 'a', 'm', ' ', '🇷🇺', '🇺🇦', '👍🏽', '👨‍👩‍👧', '1️⃣', '❤️', 'e\u0301']);
+  const england = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+  assert.deepEqual(graphemes(`${england}x`, null), [england, 'x'], 'a flag of tags');
   assert.equal(shortName('Team 🚀🚀🚀🚀', 6), 'Team 🚀…');
   assert.equal(shortName('Team 🇷🇺🇷🇺🇷🇺', 7), 'Team 🇷🇺🇷🇺…');
   assert.equal(shortName('Team 👩‍💻👩‍💻 ops', 6), 'Team 👩‍💻…');
