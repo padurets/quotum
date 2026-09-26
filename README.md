@@ -105,14 +105,16 @@ Codex         api                  idle     started 25m ago · editor
   six days after the reset and nothing on the seventh. Each subscription can have its
   own plan: a day at 0 is a day you don't spend, and it can be any day of the week.
 - **A chart of the weekly or the 5-hour windows** over the last hour up to the last 30
-  days. Ahead of now it draws the plan and the next resets, as far as you choose;
-  behind, it marks when limits came back early and when free resets were granted. Drag
-  across it to zoom into a burst of work (on a phone, hold a finger on it first); ‹ and
-  ›, or a swipe sideways, move it back and forth through time by half its length.
-- **A table with a forecast:** what the period spent and, at that pace, whether the
-  window runs out before its reset (or before your plan ends) and roughly how much
-  will be left. Over a range dragged on the chart it shows what that range cost: what
-  was left at its start and end, what it spent and how fast.
+  days. Ahead of now it draws the plan, where each window is going at its pace and the
+  next resets, as far as you choose; behind, it marks when limits came back early and
+  when free resets were granted. Drag across it to zoom into a burst of work (on a
+  phone, hold a finger on it first); ‹ and ›, or a swipe sideways, move it back and
+  forth through time by half its length.
+- **A table with a forecast:** what the period spent and, at each window's pace since
+  it started, whether it runs out before its reset (or before your plan ends, following
+  the plan's shape) and when, or roughly how much will be left. The forecast is the
+  same whatever period you look at. Over a range dragged on the chart it shows what
+  that range cost: what was left at its start and end, what it spent and how fast.
 - **Reset announcements** from the community trackers [Codex Resets](https://codex-resets.com)
   and [Claude Resets](https://claude-resets.com), with a link to the source. You
   can turn them off.

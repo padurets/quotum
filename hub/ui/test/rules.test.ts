@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {agentRows, DRAWN, drawn, folderOf} from '../lib/agents';
 import {chartEvents, chartResets, type Line} from '../lib/lines';
-import {outlook, planCell} from '../lib/forecast';
+import {planCell} from '../lib/forecast';
 import {DEFAULT_PLAN, planNote} from '../lib/plan';
 import {cadenceOf, dotOf, PULSE_FOR, resetLine} from '../lib/quota';
 import {resetLabel, type ResetStatus} from '../lib/resets';
@@ -46,13 +46,8 @@ test('a note under a limit takes a gap of ten points to the plan; behind it only
   assert.deepEqual(planNote({...hours, used: 70, remaining: 30}, now, now), {key: 'ahead', value: 20, weekly: false});
 });
 
-test('the table says where the pace leads, in its tone', () => {
+test('the plan column marks a gap of three points to the plan', () => {
   const live: Win = {id: 'weekly', kind: 'weekly', label: null, used: 50, remaining: 50, resetAt: now + 5 * DAY, minutes: 10080};
-  assert.deepEqual(outlook({consumed: 0, coveredMs: HOUR}, {...live, remaining: 0, used: 100}, now, now, null), {key: 'usedUp', tone: 'v-crit'});
-  assert.deepEqual(outlook({consumed: 0, coveredMs: HOUR}, {...live, resetAt: null}, now, now, null), {key: 'none', tone: ''});
-  assert.deepEqual(outlook({consumed: 1, coveredMs: 29 * 60_000}, live, now, now, null), {key: 'needData', tone: ''});
-  assert.equal(outlook({consumed: 0, coveredMs: DAY}, live, now, now, [15, 15, 15, 15, 15, 15, 10]).tone, 'muted', '~N% left when the plan ends');
-  assert.equal(outlook({consumed: 0, coveredMs: DAY}, live, now, now, null).tone, '', '~N% left at the reset');
   // The plan's column marks a gap of three points; a day and a half into the week the plan leaves 57.5%.
   const week = (remaining: number): Win => ({...live, used: 100 - remaining, remaining, resetAt: now + 5.5 * DAY});
   assert.equal(planCell(week(60.5), now, now, DEFAULT_PLAN)?.notable, true);

@@ -1,9 +1,9 @@
 import {memo, useMemo} from 'react';
 import {MINUTE, useNow} from '../lib/api';
 import type {History as HistoryData, Overview} from '../lib/types';
-import {duration, num} from '../lib/format';
+import {countdown, num, stamp} from '../lib/format';
 import {level} from '../lib/quota';
-import {forecastRow, spentOf, type Outlook, type Spent} from '../lib/forecast';
+import {forecastRow, spentOf, type Outlook, type Pace, type Spent} from '../lib/forecast';
 import {FORECAST, planOf, withHidden, type Arrange} from '../lib/view';
 import {linesOf} from '../lib/lines';
 import {usePrefs} from '../lib/prefs';
@@ -11,20 +11,27 @@ import {ofTimeRange} from '../lib/timeRange';
 import {t, useLocale} from '../i18n';
 import {HideRow, Popover, SlidersIcon} from './Popover';
 
-/** The last column's text and tooltip; its colour is the outlook's tone. */
+/** How fast the window goes, as the tooltip of its forecast says it. */
+const paceText = (pace: Pace) =>
+  pace.by === 'plan' ? t('forecast.planPace', {k: num(pace.k, 2)}) : t('forecast.rate', {rate: pace.rate < 0.05 ? '≈ 0' : num(pace.rate, 1)});
+
+/** The last column's text and tooltip, a part a line; its colour is the outlook's tone. */
 function outlookCell(ahead: Outlook): {text: string; title: string} {
   switch (ahead.key) {
     case 'none':
       return {text: '—', title: ''};
+    case 'idle':
     case 'needData':
-      return {text: '—', title: t('forecast.needData')};
+      return {text: '—', title: t(`forecast.${ahead.key}`)};
+    case 'pastZero':
+      return {text: '—', title: [t('forecast.pastZero', {time: stamp(ahead.at)}), t('forecast.awaiting')].join('\n')};
     case 'usedUp':
       return {text: t('forecast.usedUp'), title: ''};
   }
-  const title = t('forecast.rate', {rate: ahead.rate < 0.05 ? '≈ 0' : num(ahead.rate, 1)});
+  const title = paceText(ahead.pace);
   switch (ahead.key) {
     case 'runsOut':
-      return {text: t('forecast.runsOut', {time: duration(ahead.inMs, true)}), title};
+      return {text: t('forecast.runsOut', {time: countdown(ahead.inMs)}), title: [title, t('forecast.runsOutAt', {time: stamp(ahead.at)})].join('\n')};
     case 'onPacePlan':
     case 'onPaceReset':
       return {text: t(`forecast.${ahead.key}`), title};
@@ -41,7 +48,7 @@ const PACE_FROM = 10 * 60_000;
 
 /**
  * The windows of one kind: what is left, what the plan expects, what the period spent,
- * and where that pace leads. Its period and window type are the analytics', as the chart's. Over a
+ * and where each window's own pace leads, whatever the period. Its period and window type are the analytics', as the chart's. Over a
  * time range selected on the chart, which is in the past, it shows that range instead:
  * what was left at its start and its end, what it spent and how fast.
  */
@@ -97,7 +104,7 @@ export const Forecast = memo(function Forecast({
                   <th>{t('table.now')}</th>
                   <th title={t('table.planHint')}>{t('table.plan')}</th>
                   <th>{t('table.spent')}</th>
-                  <th>{t('table.forecast')}</th>
+                  <th title={t('table.forecastHint')}>{t('table.forecast')}</th>
                 </tr>
               )}
             </thead>

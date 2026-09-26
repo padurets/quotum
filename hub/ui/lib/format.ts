@@ -2,7 +2,7 @@ import {formatLocale, t} from '../i18n';
 
 const numbers = new Map<string, Intl.NumberFormat>();
 
-export function num(value: number, digits: 0 | 1 = 0) {
+export function num(value: number, digits: 0 | 1 | 2 = 0) {
   const locale = formatLocale();
   const key = `${locale}/${digits}`;
   let formatter = numbers.get(key);

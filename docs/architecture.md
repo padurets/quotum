@@ -287,6 +287,30 @@ them), kept for 90 days.
   linearly to their reset. The board's owner can switch a source's plan off: then none
   of its windows is planned on that board. The chart draws the plan of the current week
   only.
+- **The forecast** says where a window's own pace leads, the same over any period. It
+  counts from the window's last measurement: what was spent since the window started
+  (its reset less its length) over the calendar time since then, idle hours too. A
+  weekly window whose plan has planned 10 points by then goes the way the plan does,
+  as many times as fast as it has gone so far, and holds level past the plan's end;
+  other windows, and a week before its plan has planned 10 points, go straight on.
+  A week with a plan is judged against the end of the plan while it runs, other windows
+  against their reset: within 5 points either way of spending it all then it is on
+  pace, 5 or more over it runs out, otherwise some is left. A window says nothing until
+  it has run half an hour or a twentieth of its length, whichever is longer (8.4 hours
+  of a week), nor an idle rolling window; one due to have run out already says when and
+  waits for a new measurement. Numbers gone stale keep their forecast: the moment it runs out is a
+  moment, as true for an old measurement until it comes. The forecast assumes that after
+  an early reset a provider reports a new reset time, so the window starts over; one
+  that kept the old reset time would read as spending slower until then. A plan with days at 0
+  first counts spending on those days against its later shape, and so jumps at 10
+  points without any new spending; before 10 points, a week goes straight on past the
+  end of its own plan, and one spending just as a plan heavy on its first day does may
+  read as running out until then. On the chart each window with a forecast gets a thinner, fainter
+  line in its colour and dash, from its last value to zero or its reset. With the plan
+  or the forecast shown the chart keeps some future on its right; on `auto` it stretches
+  to the last moment a window runs out within about 40% of its width, and a window that
+  runs out further leaves the future as it is and is pointed at from the right edge. A range in the past,
+  dragged or moved to, has no forecast.
 - **Events** mark the chart behind now. An early reset is derived from the samples: a
   window's used share drops by more than 5 points before its reset time (resets of one
   source within 15 minutes are one event). Free resets granted are recorded when a
@@ -372,7 +396,7 @@ chosen in the analytics' own head. Each area is arranged on its own grid.
 The board's view comes with the overview; the owner's changes show at once and are
 saved about half a second later, one request per burst (a drag, typing a plan). What
 is only about how one person looks (the analytics' period and window type, the chart's
-horizon, lines switched off in the legend, reset announcements, the lock on the widgets,
+horizon, lines switched off in the legend, whether it draws the plan and the forecast, reset announcements, the lock on the widgets,
 the agents table's sort order, the chosen board and language) stays in their browser.
 A time range selected on the chart becomes the analytics' period; it lives in the page's
 address (`?from=&to=`), so a reload keeps it, Back undoes it and a link to it can be shared on the board.

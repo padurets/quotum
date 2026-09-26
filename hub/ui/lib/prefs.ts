@@ -9,7 +9,7 @@ export type Horizon = 'auto' | '1d' | '3d' | '7d';
 /**
  * How this reader looks at the dashboard, whatever the board: the period and window type
  * of its analytics (the chart and the table), the chart's horizon, lines switched off in
- * its legend, reset announcements, and whether the widgets are locked in place. How a
+ * its legend and whether it draws the plan and the forecast, reset announcements, and whether the widgets are locked in place. How a
  * board is arranged is the board's own (lib/view.ts).
  */
 export type Prefs = {
@@ -20,6 +20,8 @@ export type Prefs = {
   horizon: Horizon;
   /** Draw the spending plan on the weekly chart. */
   showPlan: boolean;
+  /** Draw where each window's pace leads on the chart. */
+  showForecast: boolean;
   /** Show reset announcements from the community trackers. */
   showResets: boolean;
   /** The widgets stay where they are: no handles to move or resize them. */
@@ -30,7 +32,7 @@ export type Prefs = {
 
 const KEY = 'quotum.prefs';
 export const HORIZONS: Horizon[] = ['auto', '1d', '3d', '7d'];
-const DEFAULTS: Prefs = {muted: {}, range: DEFAULT_PERIOD, kind: 'weekly', horizon: 'auto', showPlan: true, showResets: true, locked: false, agentsSort: null};
+const DEFAULTS: Prefs = {muted: {}, range: DEFAULT_PERIOD, kind: 'weekly', horizon: 'auto', showPlan: true, showForecast: true, showResets: true, locked: false, agentsSort: null};
 
 function read(): Prefs {
   try {
@@ -40,8 +42,8 @@ function read(): Prefs {
     stored.range = periodOf(String(stored.range)).id;
     if (!ANALYTICS_KINDS.includes(stored.kind)) stored.kind = DEFAULTS.kind;
     if (!HORIZONS.includes(stored.horizon)) stored.horizon = DEFAULTS.horizon;
-    const {muted, range, kind, horizon, showPlan, showResets, locked} = stored;
-    return {muted, range, kind, horizon, showPlan, showResets, locked: locked === true, agentsSort: readAgentsSort(stored.agentsSort)};
+    const {muted, range, kind, horizon, showPlan, showForecast, showResets, locked} = stored;
+    return {muted, range, kind, horizon, showPlan, showForecast, showResets, locked: locked === true, agentsSort: readAgentsSort(stored.agentsSort)};
   } catch {
     return DEFAULTS;
   }

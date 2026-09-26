@@ -83,8 +83,8 @@ export const alongPlan =
 
 /**
  * A share through `points`, each `[days into the cycle, used]`, straight in between and
- * going on as the last stretch does. Straight around `start`, the pace a day before and
- * after is the same, and so is what the table foresees.
+ * going on as the last stretch does. Straight around `start`, a day before it and a day
+ * after spend alike, and what the table foresees from the whole cycle changes slowly.
  */
 export const through =
   (...points: [number, number][]) =>
@@ -215,7 +215,7 @@ export type CardCheck = Span & {board?: string} & (
     /** How many agents the tray counts, and whether it draws a mark for each. */
     | {agents: number; drawn: boolean}
     | {window: string; level?: Level; note?: 'ahead' | 'behind' | null; hint?: 'weekly' | 'reset'; name?: string; reset?: ResetLine['key']; hidden?: boolean; started?: boolean}
-    /** A line of the table over the last 24 hours: where it leads (`tone` for `runsOut`), what it spent, and how far from the plan, when notable. */
+    /** A line of the table: what it spent over the last 24 hours, where the window's own pace leads (`tone` for `runsOut`), and how far from the plan, when notable. */
     | {forecast: string; outlook?: Outlook['key']; tone?: 'v-warn' | 'v-crit'; spent?: Spent['key']; plan?: 'ahead' | 'behind' | 'even' | 'none'}
     /** Something the chart marks on the card's source within the last 24 hours. */
     | {event: 'early_reset' | 'resets_granted'}

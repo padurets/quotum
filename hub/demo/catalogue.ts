@@ -52,12 +52,13 @@ import {
  * and the stale card (on a machine that never comes back, its five hours already over).
  * What lives by design holds only a short span from `start` and is checked in the first
  * minutes of a run, or by starting it again: the sleeping machine, agents that come and
- * go, a five-hour window ahead of its pace, a new subscription that needs 30 minutes of
- * measurements. A code about a change of agents begins 15 seconds after it at the
- * earliest, when a list that shows it has gone out. The cards measured at the hub's pace
- * (`paced`) say what their dot tells of the next measurement for minutes from `start`,
- * one resetting ten minutes in: a test of their own asks every 15 seconds as their
- * machine does, while the long one measures them on its rhythm and leaves those codes out.
+ * go, a five-hour window ahead of its pace or foreseen between two of its resets, a week
+ * begun too recently to be foreseen (8.4 hours). A code about a change of agents begins
+ * 15 seconds after it at the earliest, when a list that shows it has gone out. The cards
+ * measured at the hub's pace (`paced`) say what their dot tells of the next measurement
+ * for minutes from `start`, one resetting ten minutes in: a test of their own asks every
+ * 15 seconds as their machine does, while the long one measures them on its rhythm and
+ * leaves those codes out.
  *
  * A new state gets an entry here with at least one code; the test picks it up.
  */
@@ -116,7 +117,7 @@ export const SCENES: Scene[] = [
       'Codex cards: an accent mark "in 25h" on the left of the tray (the time is rounded down), not the reset of four hours ago; its panel heads with "Reset in 25h" and the date and time under it, then why it matters, the tracker\'s text and "Data from Codex Resets"',
       'Claude cards: a quiet mark, an arrow round a tick, not the change of limits of yesterday; its panel heads with "Reset happened", a "Max" tag beside it and the time under it',
       'Both resets for everyone are marked on the charts',
-      'On 24 hours with the plan shown, the Codex reset is pointed at from the right edge ("… in 1d →"): pointing at it or tapping it tells its date and time',
+      'On 24 hours with the plan or the forecast shown, the Codex reset is pointed at from the right edge ("… in 25h →"): pointing at it or tapping it tells its date and time',
     ],
   },
   {
@@ -384,7 +385,8 @@ const all: DemoSet = {
       ],
       look: [
         'The table of agents lists many rows, by activity',
-        'The chart\'s tooltip has a row for every line in the legend\'s order, with what is left, the plan and the gap in columns; on a phone it stays whole on the screen',
+        'The chart\'s tooltip has a row for every line in the legend\'s order, with what is left, the plan and the gap in columns up to now, and after it the plan and where each forecast leads; on a phone it stays whole on the screen',
+        'The chart\'s settings switch the plan and the forecast on and off, under "On the chart"',
         'My machines → Projects: quotum once, on the laptop, though three agents work in three folders (the tray and the table show quotum three times, with hub and quotum.feat-18-desktop-app under two of them)',
         'Renamed or merged in My machines, a project is shown under its new name in the tray and the table too',
         'Merge Quotum into quotum: one row, with both machines and "from: Quotum"; give Quotum back its name: as it was',
@@ -444,7 +446,7 @@ const all: DemoSet = {
       history: 45 * DAY,
       windows: [
         fiveHours(20 * MIN, 25, agentsWork(MAX_AGENTS, shifts(0))),
-        weekly({since: -1.5 * DAY, use: through([0, 0], [0.5, 33.2], [2.5, 56.8])}),
+        weekly({since: -1.5 * DAY, use: alongPlan(0)}),
         weekly({id: 'weekly:fable', label: 'Fable', since: -1.5 * DAY, use: through([0, 0], [0.5, 6], [1.5, 12])}),
       ],
       agents: MAX_AGENTS,
@@ -463,6 +465,7 @@ const all: DemoSet = {
       ],
       look: [
         'Its reset news is a mark on the left of the tray; the Antigravity card in its row has none',
+        'Its Fable forecast line bends where the plan\'s days end, above the dotted plan it shares with the weekly window, whose own forecast lies on the plan',
         'On 30 days the chart is full; ‹ goes back twice, the second time to where history starts, and is off there',
         'Ten marks in the tray, in two groups (two machines); the panel names working, waiting and open-window agents',
         'The long project name ends in an ellipsis; the agent without a project says so',
@@ -477,7 +480,8 @@ const all: DemoSet = {
       history: 14 * DAY,
       windows: [
         fiveHours(50 * MIN, 8, onAndOff(15), 'Gemini Pro'),
-        weekly({id: 'gemini:weekly', label: 'Gemini', since: -3 * DAY, use: through([0, 0], [2, 37], [3, 49])}),
+        // A seventh of the week a day: on pace to spend it all by the reset.
+        weekly({id: 'gemini:weekly', label: 'Gemini', since: -3 * DAY, use: steady(0, 100 / 7)}),
         // A client that does not say when this one resets.
         noReset(weekly({id: 'claude:weekly', label: 'Claude', since: -3 * DAY, use: steady(0, 8)})),
         rolling({id: 'flash:window-1440', kind: 'other', label: 'Flash', minutes: 1440, offset: -8 * HOUR, use: elapsed => (1.5 * elapsed) / HOUR}),
@@ -503,7 +507,11 @@ const all: DemoSet = {
       plan: 'Pro',
       machines: ['mac-mini'],
       history: 14 * DAY,
-      windows: [fiveHours(0, 7, agentsWork(IOS_AGENTS, ALWAYS), 'Gemini Pro'), weekly({id: 'gemini:weekly', label: 'Gemini', since: -2 * DAY, use: steady(0, 9)})],
+      windows: [
+        fiveHours(0, 7, agentsWork(IOS_AGENTS, ALWAYS), 'Gemini Pro'),
+        // A tenth faster than the default plan every day: it runs out on the fifth day, past half of the time left to the plan's end.
+        weekly({id: 'gemini:weekly', label: 'Gemini', since: -2 * DAY, use: through([0, 0], [1, 33], [2, 60.5], [3, 77])}),
+      ],
       agents: IOS_AGENTS,
       on: {ana: {}},
       expect: [
@@ -516,8 +524,14 @@ const all: DemoSet = {
         {agents: 2, drawn: true, from: 15 * MIN, to: 46 * MIN},
         {stale: true, from: 49 * MIN, to: 58 * MIN},
         {agents: 0, drawn: true, from: 52 * MIN, to: 59 * MIN},
+        // Asleep or not, the forecast stays.
+        {forecast: 'gemini:weekly', outlook: 'runsOut', tone: 'v-warn'},
       ],
-      look: ['Its machine sleeps from the 2nd minute to the 14th, and so every 45 minutes: the card goes stale (its dot, no line under the limits) and comes back, its agents go and come back, a gap stays on the 24-hour chart'],
+      look: [
+        'Its machine sleeps from the 2nd minute to the 14th, and so every 45 minutes: the card goes stale (its dot, no line under the limits) and comes back, its agents go and come back, a gap stays on the 24-hour chart',
+        'Its Gemini week runs out past the chart\'s right edge: "Antigravity 2 · Gemini: runs out in 2d →" stands there, in its colour, stacked with the other labels and never over the Codex reset\'s; pointing at it tells the date and time',
+        'On a phone 320 px wide in Russian the label shortens the name to what fits, "Antigravity 2…", with nothing hanging before the ellipsis and the time whole',
+      ],
     },
     {
       kind: 'card',
@@ -581,8 +595,13 @@ const all: DemoSet = {
         {window: 'weekly', level: 'warn', note: 'ahead', hint: 'weekly'},
         {window: 'session', note: 'ahead', hint: 'reset', to: 20 * MIN},
         {forecast: 'weekly', outlook: 'runsOut', tone: 'v-crit', plan: 'ahead'},
+        {forecast: 'session', outlook: 'runsOut', tone: 'v-crit', to: 90 * MIN},
       ],
-      look: ['A third of the row wide, with the next two cards', 'The five hours are ahead of an even pace for the first minutes: its own tooltip'],
+      look: [
+        'A third of the row wide, with the next two cards',
+        'The five hours are ahead of an even pace for the first minutes: its own tooltip',
+        'Its week runs out past the right edge of the 24-hour chart: a label there says in how many hours',
+      ],
     },
     {
       kind: 'card',
@@ -616,14 +635,17 @@ const all: DemoSet = {
       plan: 'Plus',
       machines: ['laptop'],
       history: 2 * DAY,
-      windows: [fiveHours(10 * MIN, 5, onAndOff(14)), weekly({since: -4 * DAY, use: through([0, 0], [3, 87.2], [4, 92])})],
+      windows: [fiveHours(10 * MIN, 5, onAndOff(14)), weekly({since: -4 * DAY, use: through([0, 0], [3, 87.2], [4, 93])})],
       on: {ana: {name: 'Running low', span: 4}, quiet: {}},
       expect: [
         {title: 'Running low'},
         {agents: 0, drawn: true},
         {window: 'weekly', level: 'crit', note: null},
-        {forecast: 'weekly', outlook: 'runsOut', tone: 'v-warn'},
+        {forecast: 'weekly', outlook: 'runsOut', tone: 'v-crit'},
+        // Its five hours reset ten minutes in: a forecast from 40 minutes on.
+        {forecast: 'session', outlook: 'leftReset', from: 45 * MIN, to: 5 * HOUR},
       ],
+      look: ['The weekly forecast line reaches zero within the hours ahead, where the table says it runs out'],
     },
     {
       kind: 'card',
@@ -668,8 +690,9 @@ const all: DemoSet = {
       expect: [
         {title: 'Idle five hours'},
         {window: 'session', started: false, note: null, reset: 'resetsIn'},
+        {forecast: 'session', outlook: 'idle'},
       ],
-      look: ['The five hours have not started: no pace mark, and it always resets in 5h'],
+      look: ['The five hours have not started: no pace mark, and it always resets in 5h', 'On the five-hour chart and table: no forecast for them, the tooltip says they start when first used'],
     },
     {
       kind: 'card',
@@ -710,9 +733,11 @@ const all: DemoSet = {
       history: 2 * DAY,
       until: -6 * HOUR,
       failure: {error: 'timeout', from: -6 * HOUR + 5 * MIN},
-      windows: [fiveHours(0, 5), weekly({since: -3 * DAY, use: steady(10, 9)})],
+      // Almost used up when it was last measured, and going fast.
+      windows: [fiveHours(0, 5), weekly({since: -3 * DAY, use: through([0, 0], [2.75, 97])})],
       on: {ana: {name: 'Too slow to answer'}},
-      expect: [{title: 'Too slow to answer'}, {error: 'timeout'}, {stale: true}],
+      expect: [{title: 'Too slow to answer'}, {error: 'timeout'}, {stale: true}, {forecast: 'weekly', outlook: 'pastZero'}],
+      look: ['No forecast for its week: the tooltip says around when, hours ago, it should have run out, and waits for a new measurement'],
     },
     {
       kind: 'card',
@@ -743,6 +768,7 @@ const all: DemoSet = {
         {error: null},
         {window: 'session', reset: 'resetPassed'},
         {window: 'weekly', reset: 'resetsIn'},
+        {forecast: 'weekly', outlook: 'leftPlan'},
       ],
       look: ['Not heard from for three hours: its five hours have reset since, waiting for a measurement'],
     },
@@ -773,13 +799,14 @@ const all: DemoSet = {
       plan: 'Plus',
       machines: ['laptop'],
       history: 10 * MIN,
-      windows: [fiveHours(0, 6), weekly({since: -2 * DAY, use: steady(0, 10)})],
+      // Its week began an hour before the demo.
+      windows: [fiveHours(0, 6), weekly({since: -HOUR, use: steady(0, 10)})],
       on: {ana: {name: 'New subscription'}},
       expect: [
         {title: 'New subscription'},
-        {forecast: 'weekly', outlook: 'needData', to: 19 * MIN},
+        {forecast: 'weekly', outlook: 'needData', to: 7 * HOUR},
       ],
-      look: ['For its first 20 minutes the table has no forecast for it, with a tooltip why'],
+      look: ['Until its week has run 8.4 hours the table has no forecast for it, with a tooltip why, and the chart no forecast line'],
     },
     {
       kind: 'card',

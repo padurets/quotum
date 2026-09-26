@@ -1,9 +1,9 @@
 import {useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode, type RefObject} from 'react';
-import {clock, day, duration, num, shortDay, stamp} from '../lib/format';
+import {clock, countdown, day, num, shortDay, stamp} from '../lib/format';
 import {t} from '../i18n';
 import type {Line} from '../lib/lines';
-import {hubNow} from '../lib/api';
-import {gapText, gapTone, readout as readCell, type PlanLine} from '../lib/readout';
+import {hubNow, MINUTE, useNow} from '../lib/api';
+import {gapText, gapTone, readout as readCell, valueAt, type ForecastLine, type PlanLine} from '../lib/readout';
 import {draggedRange, type TimeRange} from '../lib/timeRange';
 import {SWIPE, swiped} from '../lib/swipe';
 
@@ -22,30 +22,146 @@ const diamond = (x: number, y: number, r = 4) => `M${x},${y - r}l${r},${r}l${-r}
 /** How wide an announcement's label is taken to be, and how near an edge a value hides under it (percent). */
 const LABEL_WIDTH = 220;
 const LABEL_BAND = 15;
+/** How far apart labels stacked at the right edge stand. */
+const LABEL_STEP = 22;
+
+/** Made when first needed: a browser without it (Firefox before 125) still draws the board. */
+let segmenter: Intl.Segmenter | null | undefined;
+const defaultSegmenter = () =>
+  (segmenter ??= typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity: 'grapheme'}) : null);
+
+/**
+ * The characters of a text as a reader counts them: a flag, an emoji with its skin tone or
+ * a letter with its accent is one. Without a segmenter the common clusters are held
+ * together by hand: a pair of regional indicators, and a character with the marks
+ * (a variation selector among them), skin tones, tags and joined characters after it.
+ */
+export function graphemes(text: string, by: Intl.Segmenter | null = defaultSegmenter()) {
+  return by ? Array.from(by.segment(text), part => part.segment) : (text.match(CLUSTER) ?? []);
+}
+const CLUSTER = /\p{Regional_Indicator}{2}|[\s\S](?:[\p{M}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]|\u200d[\s\S])*/gu;
+
+/**
+ * What never hangs before the ellipsis: spaces, and marks that open, join or separate,
+ * including a straight quote after a space. What ends a word stays with it: a closing
+ * mark, a percent, a times sign, an emoji.
+ */
+const HANGING = /(?:[\s\p{Z}\p{Ps}\p{Pi}\p{Pd}\p{Pc},.:;·•/\\|&‚、。\u2212~]|(?<=\s)["'])+$/u;
+
+/** A name shortened to its first `keep` characters and an ellipsis, with no space, separator or opening mark hanging before it. */
+export function shortName(name: string, keep: number) {
+  const letters = graphemes(name);
+  return keep >= letters.length ? name : `${letters.slice(0, Math.max(0, keep)).join('').replace(HANGING, '')}…`;
+}
+
+/**
+ * How many characters of `name` fit when the text around it takes `rest` and an ellipsis
+ * `ellipsis`: the most whose widths (`widths`, one a character) leave the whole within
+ * `room`. All of them when the name fits whole.
+ */
+export function fitting(widths: number[], rest: number, ellipsis: number, room: number) {
+  const whole = widths.reduce((sum, width) => sum + width, 0);
+  if (rest + whole <= room) return widths.length;
+  let used = rest + ellipsis;
+  let keep = 0;
+  while (keep < widths.length && used + widths[keep] <= room) used += widths[keep++];
+  return keep;
+}
+
+/**
+ * The rows of the labels at the chart's right edge: those past it (`past`), and with them
+ * every announcement inside the chart (`inside`), first, so each has a row of its own
+ * however wide they are. They go from `from` down the plot, or up it. Without labels past
+ * the edge there is no stack, and an announcement stands where it would alone.
+ */
+export function edgeRows(inside: string[], past: string[], from: number, down: boolean): Map<string, number> {
+  const keys = past.length ? [...inside, ...past] : [];
+  return new Map(keys.map((key, row) => [key, from + row * (down ? LABEL_STEP : -LABEL_STEP)]));
+}
 
 /**
  * A label on the chart on a backing sized to its text, so no line under it gets in the way.
  * One pointing past the right edge tells its exact time under the pointer or on a tap
  * (`onTip`).
  */
-function MarkerLabel({x, y, end, children, onTip}: {x: number; y: number; end: boolean; children: string; onTip?: (shown: boolean, tapped: boolean) => void}) {
+function MarkerLabel({
+  x,
+  y,
+  end,
+  color,
+  children,
+  shorten,
+  fonts,
+  onTip,
+}: {
+  x: number;
+  y: number;
+  end: boolean;
+  color?: string;
+  children: string;
+  /** Wider than `room`, the text is said again with `name` in it shortened to what fits. */
+  shorten?: {name: string; say: (name: string) => string; room: number};
+  /** Counts the web fonts loaded: what was measured before one came is measured again. */
+  fonts: number;
+  onTip?: (shown: boolean, tapped: boolean) => void;
+}) {
   const text = useRef<SVGTextElement>(null);
+  const whole = useRef<SVGTextElement>(null);
   const [box, setBox] = useState<{x: number; width: number} | null>(null);
+  // How many characters of the name it keeps, for the text, room and fonts it was measured
+  // with (`input`): a fit found for anything else is not used, and the text shows whole.
+  const input = shorten ? `${children}|${shorten.room}|${fonts}` : '';
+  const [fit, setFit] = useState<{input: string; keep: number | null} | null>(null);
+  const keep = fit?.input === input ? fit.keep : null;
+  const shown = shorten && keep !== null ? shorten.say(shortName(shorten.name, keep)) : children;
+  // Measured once for each input, on a hidden copy of the whole text with an ellipsis after
+  // it: its width, each character of the name as drawn in it, and the ellipsis. Where the
+  // copy does not hold the text character for character (the name not in it, spaces drawn
+  // as one), or the browser will not measure, the text shows whole: a label a little wide
+  // is better than a board that is not drawn.
+  useLayoutEffect(() => {
+    const element = whole.current;
+    if (!shorten || !element) return;
+    let found: number | null = null;
+    try {
+      const start = children.indexOf(shorten.name);
+      const length = element.getSubStringLength(0, children.length);
+      if (length > shorten.room && start >= 0 && element.getNumberOfChars() === children.length + 1) {
+        let at = start;
+        const widths = graphemes(shorten.name).map(letter => {
+          const width = element.getSubStringLength(at, letter.length);
+          at += letter.length;
+          return width;
+        });
+        const name = widths.reduce((sum, width) => sum + width, 0);
+        found = fitting(widths, length - name, element.getSubStringLength(children.length, 1), shorten.room);
+      }
+    } catch {
+      found = null;
+    }
+    setFit(fit => (fit?.input === input && fit.keep === found ? fit : {input, keep: found}));
+  }, [input]);
   useLayoutEffect(() => {
     const measured = text.current?.getBBox();
     if (measured) setBox({x: measured.x, width: measured.width});
-  }, [x, y, end, children]);
+  }, [x, y, end, shown, fonts]);
   return (
     <g
-      className={`marker-label ${onTip ? 'is-pointed' : ''}`}
+      className={`marker-label ${onTip ? 'is-pointed' : ''} ${color ? 'is-forecast' : ''}`}
+      style={color ? ({'--label-color': color} as CSSProperties) : undefined}
       onPointerEnter={onTip && (event => event.pointerType !== 'touch' && onTip(true, false))}
       onPointerLeave={onTip && (event => event.pointerType !== 'touch' && onTip(false, false))}
       onPointerUp={onTip && (event => event.pointerType === 'touch' && onTip(true, true))}
     >
       {box && <rect x={box.x - 6} y={y - 13} width={box.width + 12} height={19} rx={5} />}
       <text ref={text} x={x} y={y} textAnchor={end ? 'end' : 'start'}>
-        {children}
+        {shown}
       </text>
+      {shorten && (
+        <text ref={whole} x={x} y={y} textAnchor={end ? 'end' : 'start'} visibility="hidden" aria-hidden="true">
+          {`${children}…`}
+        </text>
+      )}
     </g>
   );
 }
@@ -108,6 +224,7 @@ export function slideOf(before: {from: number; end: number}, after: {from: numbe
 export function Chart({
   lines,
   plans = [],
+  forecasts = [],
   markers = [],
   from,
   now,
@@ -119,6 +236,7 @@ export function Chart({
 }: {
   lines: Line[];
   plans?: PlanLine[];
+  forecasts?: ForecastLine[];
   markers?: Marker[];
   from: number;
   /** Where measurements end; everything right of it is the future. */
@@ -219,11 +337,37 @@ export function Chart({
     [lines, from, now, span, width, height, cellMs],
   );
 
-  const {rows, planned} = hover === null ? {rows: [], planned: false} : readCell(lines, plans, hover, cellMs, now, to);
+  const none = {left: false, plan: false, gap: false, forecast: false};
+  const {rows, columns} = hover === null ? {rows: [], columns: none} : readCell(lines, plans, hover, cellMs, now, to, forecasts);
+  const columnCount = Object.values(columns).filter(Boolean).length;
+  // A cell ahead of now where no line reads anything says only what happens in it.
+  const grid = rows.length > 0 && columnCount > 0;
   const markerReadout = hover === null ? [] : markers.filter(m => m.at >= hover && m.at < hover + cellMs);
-  /** A marker past the right edge, its label pointed at or tapped: the tooltip tells its time instead of the cell's values. */
+  // Past the right edge: an announcement, then where windows run out, each said there,
+  // how soon by the page's clock as the table says it, a series' name shortened to the plot.
+  const pageNow = useNow(MINUTE);
+  // Labels are measured: a web font that arrives later makes them as wide as they are drawn.
+  const [fonts, setFonts] = useState(0);
+  useEffect(() => {
+    const loaded = () => setFonts(count => count + 1);
+    document.fonts?.addEventListener('loadingdone', loaded);
+    return () => document.fonts?.removeEventListener('loadingdone', loaded);
+  }, []);
+  const beyond = [
+    ...markers
+      .filter(m => m.strong && !m.past && m.at > to)
+      .map(m => ({key: m.key, label: m.label, time: stamp(m.at), text: t('chart.ahead', {label: m.label, time: countdown(m.at - pageNow)}), color: undefined, say: undefined})),
+    ...forecasts.flatMap(f => {
+      if (f.at === null || f.at <= to) return [];
+      // Spaces drawn as one: a name typed with two in a row reads, and measures, as SVG draws it.
+      const name = f.name.replace(/\s+/g, ' ');
+      const say = (label: string) => t('chart.runsOut', {label, time: countdown(f.at! - pageNow)});
+      return [{key: `forecast-${f.key}`, label: name, time: t('forecast.runsOutAt', {time: stamp(f.at)}), text: say(name), color: f.color, say}];
+    }),
+  ];
+  /** A label past the right edge pointed at or tapped: the tooltip tells its time instead of the cell's values. */
   const [edge, setEdge] = useState<{key: string; tapped: boolean} | null>(null);
-  const edgeMarker = edge && markers.find(m => m.key === edge.key && m.at > to);
+  const edgeMarker = edge && beyond.find(m => m.key === edge.key);
   // A label taken away under the pointer (a step to a range, which has no future) says nothing
   // of it: what it told is forgotten, so the tooltip reads the cells again.
   useEffect(() => {
@@ -267,6 +411,36 @@ export function Chart({
     }
     return low > high ? top + 18 : height - bottom - 8;
   };
+  // With labels past the right edge, an announcement inside the chart takes the first
+  // place in their stack: a row of its own, so none lies over it, however wide they are.
+  const announced = markers.filter(m => m.strong && !m.past && m.at <= to);
+  const stacked = beyond.length ? announced.length + beyond.length : 0;
+  // The stack stands at the top or the bottom of the plot, where it hides less of what
+  // runs under it by the edge: the lines measured, planned and foreseen.
+  const stackTop = (() => {
+    if (!stacked) return false;
+    const band = ((stacked * LABEL_STEP + 6) / (height - top - bottom)) * 100;
+    const [a, b] = [width - right - LABEL_WIDTH, width - right].map(timeAt);
+    let low = 0;
+    let high = 0;
+    const count = (value: number | undefined) => {
+      if (value === undefined) return;
+      if (value < band) low++;
+      else if (value > 100 - band) high++;
+    };
+    for (const line of lines) for (const [at, value] of line.points) if (at >= a && at <= b) count(value);
+    const across = [0, 0.25, 0.5, 0.75, 1].map(share => a + (b - a) * share);
+    for (const forecast of forecasts) for (const at of across) count(valueAt([forecast.points], at));
+    for (const plan of plans) for (const at of across) count(valueAt(plan.runs, at));
+    return high < low;
+  })();
+  // Stacked from the first one away from the edge of the plot it stands by.
+  const stackRows = edgeRows(
+    announced.map(m => m.key),
+    beyond.map(label => label.key),
+    stackTop ? top + 18 : height - bottom - 8,
+    stackTop,
+  );
   const move = (event: PointerEvent<SVGSVGElement>) => {
     const px = toChart(event);
     pointer.current = px;
@@ -443,6 +617,15 @@ export function Chart({
                 d={plan.runs.map(run => run.map(([at, value], i) => `${i ? 'L' : 'M'}${x(at).toFixed(1)},${y(value).toFixed(1)}`).join('')).join('')}
               />
             ))}
+            {forecasts.map(forecast => (
+              <path
+                key={forecast.key}
+                className="forecast-line"
+                stroke={forecast.color}
+                strokeDasharray={forecast.dash || undefined}
+                d={forecast.points.map(([at, value], i) => `${i ? 'L' : 'M'}${x(at).toFixed(1)},${y(value).toFixed(1)}`).join('')}
+              />
+            ))}
             {markers.map(marker => {
               if (marker.at > to) return null;
               const mx = x(marker.at);
@@ -467,26 +650,32 @@ export function Chart({
               <path key={line.key} d={paths[i].line} className="series" stroke={line.color} strokeDasharray={line.dash || undefined} />
             ))}
             {/* Announcements are read over the lines, each on its own backing. */}
-            {markers
-              .filter(marker => marker.strong && !marker.past)
-              .map(marker => {
-                const beyond = marker.at > to;
-                const mx = beyond ? width - right : x(marker.at);
-                // Beyond the visible future: at the right edge, with the distance.
-                const nearRight = beyond || mx > width - right - 150;
-                const lx = beyond ? mx : nearRight ? mx - 6 : mx + 6;
-                return (
-                  <MarkerLabel
-                    key={marker.key}
-                    x={lx}
-                    y={labelY(lx, nearRight)}
-                    end={nearRight}
-                    onTip={beyond ? (shown, tapped) => setEdge(shown ? {key: marker.key, tapped} : null) : undefined}
-                  >
-                    {beyond ? t('chart.ahead', {label: marker.label, time: duration(marker.at - now, true)}) : marker.label}
-                  </MarkerLabel>
-                );
-              })}
+            {announced.map(marker => {
+              const mx = x(marker.at);
+              const nearRight = mx > width - right - 150;
+              const lx = nearRight ? mx - 6 : mx + 6;
+              return (
+                <MarkerLabel key={marker.key} x={lx} y={stackRows.get(marker.key) ?? labelY(lx, nearRight)} end={nearRight} fonts={fonts}>
+                  {marker.label}
+                </MarkerLabel>
+              );
+            })}
+            {/* Beyond the visible future: at the right edge, with the distance, one under another. */}
+            {beyond.map(label => (
+              <MarkerLabel
+                key={label.key}
+                x={width - right}
+                y={stackRows.get(label.key)!}
+                end
+                color={label.color}
+                fonts={fonts}
+                // It ends at the plot's right edge, and its backing, 6 wider than the text, starts within the plot.
+                shorten={label.say && {name: label.label, say: label.say, room: width - left - right - 6}}
+                onTip={(shown, tapped) => setEdge(shown ? {key: label.key, tapped} : null)}
+              >
+                {label.text}
+              </MarkerLabel>
+            ))}
             {hover === null &&
               lines.map((line, i) =>
                 paths[i].last ? (
@@ -511,45 +700,41 @@ export function Chart({
       </svg>
 
       {edgeMarker ? (
-        <Tooltip tip={tip} className="is-edge" style={{right: 0, bottom: `calc(100% - ${(labelY(width - right, true) - 18) * scale}px)`}}>
-          <div className="tooltip-marker is-strong">{edgeMarker.label}</div>
-          <div className="tooltip-time">{stamp(edgeMarker.at)}</div>
+        <Tooltip tip={tip} className="is-edge" style={{right: 0, bottom: `calc(100% - ${(stackRows.get(edgeMarker.key)! - 18) * scale}px)`}}>
+          <div className={`tooltip-marker ${edgeMarker.color ? '' : 'is-strong'}`} style={edgeMarker.color ? {color: edgeMarker.color} : undefined}>
+            {edgeMarker.label}
+          </div>
+          <div className="tooltip-time">{edgeMarker.time}</div>
         </Tooltip>
       ) : (
         hover !== null &&
         !drag &&
-        (rows.some(row => row.left !== null || row.plan !== null) || markerReadout.length > 0) && (
+        (rows.some(row => row.left !== null || row.plan !== null || row.forecast !== null) || markerReadout.length > 0) && (
           <Tooltip tip={tip} className={narrow ? 'is-below' : ''} style={narrow ? {top: height * scale - lift} : {left: tipLeft, maxWidth: tipRoom}}>
             <div className="tooltip-time">{cellLabel(hover, cellMs)}</div>
-            {rows.length > 0 && (
-              <div className={`tooltip-grid ${planned ? 'is-planned' : ''}`}>
+            {grid && (
+              <div className="tooltip-grid" style={{gridTemplateColumns: `14px minmax(0, 1fr) repeat(${columnCount}, auto)`}}>
                 <span />
                 <span />
-                <span className="tooltip-head">{t('chart.left')}</span>
-                {planned && (
-                  <>
-                    <span className="tooltip-head">{t('chart.plan')}</span>
-                    <span className="tooltip-head">{t('chart.gap')}</span>
-                  </>
-                )}
+                {columns.left && <span className="tooltip-head">{t('chart.left')}</span>}
+                {columns.plan && <span className="tooltip-head">{t('chart.plan')}</span>}
+                {columns.gap && <span className="tooltip-head">{t('chart.gap')}</span>}
+                {columns.forecast && <span className="tooltip-head">{t('chart.forecast')}</span>}
                 {rows.map(row => (
                   <div className="tooltip-row" key={row.line.key}>
                     <svg width="14" height="4" aria-hidden="true">
                       <line x1="0" x2="14" y1="2" y2="2" stroke={row.line.color} strokeWidth="2" strokeDasharray={row.line.dash || undefined} />
                     </svg>
                     <span className="tooltip-name">{row.line.name}</span>
-                    <strong>{row.left !== null && `${num(row.left)}%`}</strong>
-                    {planned && (
-                      <>
-                        <span className="tooltip-plan">{row.plan !== null && `${num(row.plan)}%`}</span>
-                        <span className={`tooltip-gap ${row.gap !== null ? gapTone(row.gap) : ''}`}>{row.gap !== null && gapText(row.gap)}</span>
-                      </>
-                    )}
+                    {columns.left && <strong>{row.left !== null && `${num(row.left)}%`}</strong>}
+                    {columns.plan && <span className="tooltip-plan">{row.plan !== null && `${num(row.plan)}%`}</span>}
+                    {columns.gap && <span className={`tooltip-gap ${row.gap !== null ? gapTone(row.gap) : ''}`}>{row.gap !== null && gapText(row.gap)}</span>}
+                    {columns.forecast && <span className="tooltip-forecast">{row.forecast !== null && `${num(row.forecast)}%`}</span>}
                   </div>
                 ))}
               </div>
             )}
-            {rows.length > 0 && markerReadout.length > 0 && <div className="tooltip-sep" />}
+            {grid && markerReadout.length > 0 && <div className="tooltip-sep" />}
             {markerReadout.map(marker => (
               <div className={`tooltip-mark ${marker.strong ? 'is-strong' : ''}`} key={marker.key}>
                 <svg width="14" height="10" aria-hidden="true">
